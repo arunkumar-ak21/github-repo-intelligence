@@ -1,0 +1,42 @@
+# ── Environment ──────────────────────────
+.env
+.env.*
+*.env
+
+# ── Python ───────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+*.whl
+
+# ── Virtual Environment ─────────────────
+venv/
+.venv/
+env/
+
+# ── Node / Frontend ──────────────────────
+node_modules/
+dist/
+build/
+
+# ── IDE ──────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Data & Reports ──────────────────────
+data/
+*.db
+*.sqlite3
+
+# ── OS ───────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ─────────────────────────────────
+*.log

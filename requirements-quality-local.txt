@@ -1,0 +1,8 @@
+# Local prototype install that makes the standalone Code-Quality package
+# available inside the github-repo-intelligence virtual environment.
+#
+# Production should publish cq-pipeline as an internal package or use the
+# reusable GitHub Actions workflow as the scanner source of truth.
+
+-r requirements.txt
+-e ../Code-Quality[all]

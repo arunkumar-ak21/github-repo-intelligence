@@ -1,0 +1,281 @@
+name: Reusable Repository Quality Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      code_quality_package:
+        description: Python package spec for the Code-Quality tool.
+        required: false
+        type: string
+        default: "cq-pipeline[all]"
+      max_findings:
+        description: Maximum findings to send to the dashboard payload.
+        required: false
+        type: string
+        default: "500"
+    secrets:
+      DASHBOARD_URL:
+        required: true
+      DASHBOARD_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  actions: read
+
+jobs:
+  quality-gate:
+    name: quality-gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout pushed code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Code Quality Tool
+        run: |
+          python -m pip install --upgrade pip
+          pip install "${{ inputs.code_quality_package }}" semgrep
+
+      - name: Install external scanner tools
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin/ gitleaks
+          gitleaks version
+          semgrep --version
+
+      - name: Run Code Quality Scan
+        run: |
+          mkdir -p reports
+          echo "SCAN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+          set +e
+          cq-pipeline scan --all --format all
+          SCAN_EXIT=$?
+          set -e
+
+          echo "SCAN_EXIT=$SCAN_EXIT" >> "$GITHUB_ENV"
+
+      - name: Normalize report filenames
+        if: always()
+        run: |
+          mkdir -p reports
+
+          JSON_REPORT="$(ls -t reports/*.json 2>/dev/null | head -n 1 || true)"
+          HTML_REPORT="$(ls -t reports/*.html 2>/dev/null | head -n 1 || true)"
+
+          if [ -n "$JSON_REPORT" ]; then
+            cp "$JSON_REPORT" reports/quality-report.json
+          else
+            echo '{"verdict":"error","error":"No JSON report generated"}' > reports/quality-report.json
+          fi
+
+          if [ -n "$HTML_REPORT" ]; then
+            cp "$HTML_REPORT" reports/quality-report.html
+          else
+            echo "<html><body><h1>No HTML report generated</h1></body></html>" > reports/quality-report.html
+          fi
+
+      - name: Ensure jq is available
+        if: always()
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::warning::jq is not installed. Install jq or replace payload generation with Python."
+            exit 1
+          fi
+
+      - name: Build dashboard quality payload
+        if: always()
+        run: |
+          VERDICT="$(jq -r '.verdict // "error"' reports/quality-report.json)"
+          VERDICT="$(echo "$VERDICT" | tr '[:upper:]' '[:lower:]')"
+
+          case "$VERDICT" in
+            pass|warn)
+              STATUS="passed"
+              BLOCKING=false
+              ;;
+            fail)
+              STATUS="failed"
+              BLOCKING=true
+              ;;
+            error|*)
+              VERDICT="error"
+              STATUS="error"
+              BLOCKING=true
+              ;;
+          esac
+
+          PR_NUMBER="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH")"
+          FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          WORKFLOW_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          jq -n \
+            --slurpfile raw reports/quality-report.json \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ github.head_ref || github.ref_name }}" \
+            --arg commit_sha "${{ github.sha }}" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --arg workflow_url "$WORKFLOW_URL" \
+            --arg pr_number "$PR_NUMBER" \
+            --arg stage "quality_gate" \
+            --arg status_check "quality-gate" \
+            --arg verdict "$VERDICT" \
+            --arg status "$STATUS" \
+            --argjson blocking "$BLOCKING" \
+            --arg started_at "${SCAN_STARTED_AT:-}" \
+            --arg finished_at "$FINISHED_AT" \
+            --arg max_findings "${{ inputs.max_findings }}" \
+            '{
+              repo: $repo,
+              branch: $branch,
+              commit_sha: $commit_sha,
+              pr_number: (if $pr_number == "" then null else ($pr_number | tonumber) end),
+              workflow_run_id: $workflow_run_id,
+              workflow_url: $workflow_url,
+              stage: $stage,
+              status_check: $status_check,
+              verdict: $verdict,
+              status: $status,
+              blocking: $blocking,
+              started_at: (if $started_at == "" then null else $started_at end),
+              finished_at: $finished_at,
+              summary: {
+                total_findings: ($raw[0].total_findings // 0),
+                critical: ($raw[0].critical_count // 0),
+                high: ($raw[0].high_count // 0),
+                medium: ($raw[0].medium_count // 0),
+                low: ($raw[0].low_count // 0),
+                files_scanned: ($raw[0].files_scanned // 0),
+                duration_seconds: ($raw[0].duration_seconds // 0)
+              },
+              findings: (
+                [($raw[0].scan_results // [])[].findings[]?]
+                | sort_by(({
+                    critical: 0,
+                    high: 1,
+                    medium: 2,
+                    low: 3,
+                    info: 4
+                  }[.severity] // 99))
+                | .[:($max_findings | tonumber)]
+                | map({
+                    scanner: (.scanner // null),
+                    severity: (.severity // null),
+                    rule_id: (.rule_id // null),
+                    title: (.title // null),
+                    message: (.message // null),
+                    file_path: (.file_path // null),
+                    line_number: (.line_number // null),
+                    recommendation: (.recommendation // .suggestion // null)
+                  })
+              ),
+              artifacts: {
+                json_report: "quality-report.json",
+                html_report: "quality-report.html",
+                github_artifact: "quality-report"
+              },
+              raw_report: $raw[0]
+            }' > reports/dashboard-quality-payload.json
+
+          jq '{
+            repo,
+            branch,
+            commit_sha,
+            pr_number,
+            workflow_run_id,
+            workflow_url,
+            stage,
+            status_check,
+            verdict,
+            status,
+            blocking,
+            started_at,
+            finished_at,
+            summary,
+            artifacts
+          }' reports/dashboard-quality-payload.json > reports/workflow-summary.json
+
+      - name: Upload Quality Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-report
+          path: reports/
+
+      - name: Send Quality Report to Dashboard
+        if: always()
+        run: |
+          set +e
+
+          HTTP_CODE=$(curl -sS -o /tmp/dashboard_response.txt -w "%{http_code}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -X POST "${{ secrets.DASHBOARD_URL }}/api/quality/report" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.DASHBOARD_API_KEY }}" \
+            --data-binary @reports/dashboard-quality-payload.json)
+
+          CURL_EXIT=$?
+          set -e
+
+          if [ "$CURL_EXIT" != "0" ]; then
+            echo "::warning::Dashboard submission failed with curl exit code $CURL_EXIT"
+            cat /tmp/dashboard_response.txt || true
+          elif [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::warning::Dashboard submission returned HTTP $HTTP_CODE"
+            cat /tmp/dashboard_response.txt || true
+          else
+            echo "Dashboard submission successful with HTTP $HTTP_CODE"
+          fi
+
+      - name: Fail if quality gate failed
+        run: |
+          exit "$SCAN_EXIT"
+
+  compiler-check:
+    name: compiler-check
+    runs-on: ubuntu-latest
+    needs: quality-gate
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run compiler check
+        run: |
+          echo "Compiler check placeholder"
+
+  ai-remediation:
+    name: ai-remediation
+    runs-on: ubuntu-latest
+    needs: [quality-gate, compiler-check]
+    if: ${{ !cancelled() && needs.quality-gate.result == 'success' && needs.compiler-check.result == 'failure' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run AI remediation
+        run: |
+          echo "AI remediation placeholder"
+
+  final-verification:
+    name: final-verification
+    runs-on: ubuntu-latest
+    needs: ai-remediation
+    if: ${{ !cancelled() && needs.ai-remediation.result == 'success' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Final verification
+        run: |
+          echo "Rerun quality-gate and compiler-check after AI fix"

@@ -1,0 +1,40 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://repohub:repohub@postgres:5432/repohub
+      HOST: 0.0.0.0
+      PORT: 8000
+      ALLOWED_ORIGINS: "*"
+      REQUIRE_LOGIN: "true"
+      SESSION_COOKIE_SECURE: "false"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../data:/app/data
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: repohub
+      POSTGRES_USER: repohub
+      POSTGRES_PASSWORD: repohub
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repohub -d repohub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

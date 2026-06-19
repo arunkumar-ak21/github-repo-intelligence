@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Repository Intelligence</title>
+    <meta name="description" content="Production-grade GitHub repository intelligence for metadata, CI/CD, dependency risk, history, and architecture maps.">
+    <script>
+        try {
+            document.documentElement.dataset.theme = localStorage.getItem("repoHubTheme") || "light";
+        } catch (error) {
+            document.documentElement.dataset.theme = "light";
+        }
+    </script>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/github-refresh.css">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' rx='22' fill='%23070a12'/%3E%3Cpath d='M21 56c0-18 12-31 28-31 12 0 21 6 25 16l-13 5c-2-5-6-8-12-8-8 0-14 7-14 18s6 18 14 18c7 0 11-4 13-10h-15V53h29v7c0 17-11 27-27 27-16 0-28-13-28-31Z' fill='%2300d4ff'/%3E%3C/svg%3E">
+</head>
+<body class="landing-active">
+    <div class="mesh-bg" aria-hidden="true"></div>
+    <div class="grid-bg" aria-hidden="true"></div>
+
+    <main class="landing-page mainline-page" id="landing-page">
+        <nav class="landing-nav" aria-label="Home navigation">
+            <a class="landing-brand" href="#home" aria-label="Repo Intelligence home">
+                <span class="brand-mark">RI</span>
+                <span>
+                    <strong>Repo Intelligence</strong>
+                    <small>Arya Technologies</small>
+                </span>
+            </a>
+            <div class="landing-links">
+                <a href="#features">Features</a>
+                <a href="#workflow">Workflow</a>
+                <a href="#security">Security</a>
+                <a href="#dashboard-preview">Dashboard</a>
+                <button class="icon-btn" id="landing-theme-toggle" type="button" aria-label="Toggle theme">
+                    <span id="landing-theme-icon">D</span>
+                </button>
+                <button class="btn btn-primary" type="button" data-auth-login>
+                    <span>Sign up with GitHub</span>
+                </button>
+            </div>
+        </nav>
+
+        <section class="home-hero" id="home">
+            <div class="home-hero-copy">
+                <span class="eyebrow">GitHub-native quality platform</span>
+                <h1>Repository quality gates without asking developers to babysit setup.</h1>
+                <p>
+                    Arya tech Repo Quality Platform installs as a GitHub App, provisions selected
+                    repositories, enforces branch checks, and gives engineering teams a clean monitor
+                    for quality, CI/CD, dependency, and repository intelligence.
+                </p>
+                <div class="home-cta-row">
+                    <button class="btn btn-primary btn-large" type="button" data-auth-login>
+                        <span>Sign up with GitHub</span>
+                    </button>
+                </div>
+                <div class="landing-auth-card" id="landing-auth-card">
+                    <span class="status-badge status-warn">Checking GitHub sign up</span>
+                </div>
+            </div>
+
+            <div class="home-hero-features" aria-label="Platform highlights">
+                <div class="hero-feature">
+                    <span class="feature-symbol">01</span>
+                    <div>
+                        <h2>Install once</h2>
+                        <p>Client authorizes the GitHub App and selects repositories from GitHub.</p>
+                    </div>
+                </div>
+                <div class="hero-feature">
+                    <span class="feature-symbol">02</span>
+                    <div>
+                        <h2>Provision automatically</h2>
+                        <p>Workflow files, Actions secrets, repository registration, and rulesets are configured by the platform.</p>
+                    </div>
+                </div>
+                <div class="hero-feature">
+                    <span class="feature-symbol">03</span>
+                    <div>
+                        <h2>Block unsafe merges</h2>
+                        <p>GitHub Actions and branch protection enforce quality checks on main and develop.</p>
+                    </div>
+                </div>
+                <div class="hero-feature">
+                    <span class="feature-symbol">04</span>
+                    <div>
+                        <h2>Monitor every run</h2>
+                        <p>Pipeline history, artifacts, findings, and setup state stay visible per repository and tenant.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="product-preview-shell" id="dashboard-preview" aria-label="Dashboard preview">
+            <div class="preview-window">
+                <div class="preview-sidebar">
+                    <strong>Repo Intelligence</strong>
+                    <span>Overview</span>
+                    <span>Pipeline Monitor</span>
+                    <span>Repo Setup</span>
+                    <span>History</span>
+                </div>
+                <div class="preview-content">
+                    <div class="preview-topline">
+                        <span class="preview-pill">owner/repo</span>
+                        <span class="preview-pill success">quality-gate passed</span>
+                    </div>
+                    <div class="preview-board">
+                        <article>
+                            <span class="preview-label">Workflow</span>
+                            <strong>Installed</strong>
+                            <p>Reusable or standalone GitHub Actions quality pipeline.</p>
+                        </article>
+                        <article>
+                            <span class="preview-label">Secrets</span>
+                            <strong>Configured</strong>
+                            <p>Repo-scoped API key and dashboard endpoint are created securely.</p>
+                        </article>
+                        <article>
+                            <span class="preview-label">Ruleset</span>
+                            <strong>Enforced</strong>
+                            <p>Required checks prevent bad code from reaching protected branches.</p>
+                        </article>
+                    </div>
+                    <table class="preview-table" aria-label="Pipeline preview">
+                        <thead>
+                            <tr>
+                                <th>Stage</th>
+                                <th>Status</th>
+                                <th>Findings</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>quality_gate</td>
+                                <td><span class="mini-status pass">passed</span></td>
+                                <td>0 critical, 1 medium</td>
+                            </tr>
+                            <tr>
+                                <td>compiler_check</td>
+                                <td><span class="mini-status warn">waiting</span></td>
+                                <td>Next stage</td>
+                            </tr>
+                            <tr>
+                                <td>final_verification</td>
+                                <td><span class="mini-status idle">skipped</span></td>
+                                <td>Runs after AI fix</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <section class="landing-section" id="features">
+            <div class="section-intro">
+                <span class="eyebrow">Platform coverage</span>
+                <h2>Made for teams that need GitHub enforcement, repository evidence, and client-ready reporting in one place.</h2>
+            </div>
+            <div class="feature-mosaic">
+                <article class="home-feature-card wide">
+                    <span class="feature-index">01</span>
+                    <h3>Autonomous GitHub App onboarding</h3>
+                    <p>Tenants sign in with GitHub, install the app, sync selected repositories, and let the platform register them with repo-scoped keys.</p>
+                </article>
+                <article class="home-feature-card wide-sm">
+                    <span class="feature-index">02</span>
+                    <h3>Quality gate enforcement</h3>
+                    <p>GitHub Actions runs automatically on push and pull request, uploads reports, posts to the dashboard, and feeds required status checks.</p>
+                </article>
+                <article class="home-feature-card">
+                    <span class="feature-index">03</span>
+                    <h3>Pipeline Monitor</h3>
+                    <p>Track repo, branch, commit, workflow run, PR number, stage results, findings, artifacts, and latest status per repository.</p>
+                </article>
+                <article class="home-feature-card">
+                    <span class="feature-index">04</span>
+                    <h3>Repository intelligence</h3>
+                    <p>Metadata, CI/CD, dependencies, architecture context, commit activity, contributors, README, file tree, and stored analysis history.</p>
+                </article>
+                <article class="home-feature-card">
+                    <span class="feature-index">05</span>
+                    <h3>Security-first reporting</h3>
+                    <p>Secret redaction, report authentication, repo allowlists, duplicate handling, branch protection, and artifact-first logs.</p>
+                </article>
+                <article class="home-feature-card">
+                    <span class="feature-index">06</span>
+                    <h3>Extensible remediation stages</h3>
+                    <p>Compiler checks, AI remediation, final verification, and human-review states fit into the same stage contract.</p>
+                </article>
+            </div>
+        </section>
+
+        <section class="landing-section workflow-section" id="workflow">
+            <div class="section-intro">
+                <span class="eyebrow">Workflow</span>
+                <h2>From GitHub install to enforced repository protection with fewer client-side steps.</h2>
+            </div>
+            <div class="workflow-rail">
+                <article>
+                    <span>Step 1</span>
+                    <h3>Sign in and install</h3>
+                    <p>The user signs in with GitHub, installs the GitHub App, and selects the repositories or organization.</p>
+                </article>
+                <article>
+                    <span>Step 2</span>
+                    <h3>Sync repositories</h3>
+                    <p>The dashboard detects installations, registers selected repos, and creates repo-scoped API keys.</p>
+                </article>
+                <article>
+                    <span>Step 3</span>
+                    <h3>Configure enforcement</h3>
+                    <p>Workflow files, GitHub Actions secrets, and branch rulesets are applied through the GitHub App permissions.</p>
+                </article>
+                <article>
+                    <span>Step 4</span>
+                    <h3>Monitor results</h3>
+                    <p>Pipeline runs, quality findings, artifacts, and repo intelligence appear in a GitHub-like workspace.</p>
+                </article>
+            </div>
+        </section>
+
+        <section class="landing-section evidence-section" id="security">
+            <div class="evidence-copy">
+                <span class="eyebrow">Security and tenancy</span>
+                <h2>Built around company-level enforcement, not fragile developer laptop hooks.</h2>
+                <p>
+                    Local hooks can help developers catch problems early, but the mandatory control point
+                    is GitHub Actions plus branch protection. Reports are authenticated, redacted, scoped
+                    to tenants, and stored separately from repository intelligence history.
+                </p>
+            </div>
+            <div class="evidence-list">
+                <div><strong>Tenant-aware data model</strong><span>Users, installations, repositories, pipeline runs, stages, findings, and setup state stay scoped to the right account.</span></div>
+                <div><strong>Required status checks</strong><span>Quality and compiler checks can be selected in rulesets so failed workflows block main and develop merges.</span></div>
+                <div><strong>Redacted secret findings</strong><span>Secret values are never sent raw to the dashboard, logs, UI, or future AI remediation modules.</span></div>
+                <div><strong>Artifact-first reports</strong><span>Large logs stay in GitHub Actions artifacts while the dashboard stores summaries, links, and normalized findings.</span></div>
+            </div>
+        </section>
+
+        <section class="landing-final">
+            <span class="eyebrow">Start with GitHub</span>
+            <h2>Install once, protect every selected repository, and keep the evidence visible.</h2>
+            <button class="btn btn-primary btn-large" type="button" data-auth-login>
+                <span>Sign up with GitHub</span>
+            </button>
+        </section>
+
+        <footer class="landing-footer">
+            <div>
+                <a class="landing-brand" href="#home" aria-label="Repo Intelligence footer home">
+                    <span class="brand-mark">RI</span>
+                    <span>
+                        <strong>Repo Intelligence</strong>
+                        <small>Arya Technologies</small>
+                    </span>
+                </a>
+                <p>GitHub App onboarding, repository intelligence, quality gates, branch protection, and pipeline monitoring for modern engineering teams.</p>
+            </div>
+            <nav aria-label="Footer links">
+                <a href="#features">Features</a>
+                <a href="#workflow">Workflow</a>
+                <a href="#security">Security</a>
+                <a href="#dashboard-preview">Dashboard</a>
+            </nav>
+            <div class="footer-meta">
+                <span>Built for GitHub organizations and individual maintainers.</span>
+                <span>Local hooks are optional. GitHub Actions enforcement is mandatory.</span>
+            </div>
+        </footer>
+    </main>
+
+    <div class="dashboard-app" id="dashboard-app" hidden>
+    <header class="topbar">
+        <a class="brand" href="/" aria-label="GitHub Repository Intelligence home">
+            <span class="brand-mark">RI</span>
+            <span>
+                <strong>Repo Intelligence</strong>
+                <small>Arya Technologies</small>
+            </span>
+        </a>
+
+        <form class="quick-search" id="analysis-form">
+            <span class="prompt-mark">repo</span>
+            <input id="repo-input" type="text" spellcheck="false" autocomplete="off" aria-label="GitHub repository" placeholder="owner/repo">
+            <button class="btn btn-primary" id="analyze-btn" type="submit">
+                <span>Analyze</span>
+            </button>
+        </form>
+
+        <div class="topbar-actions">
+            <div class="auth-controls" id="auth-controls" aria-label="User and tenant session">
+                <span class="status-badge status-warn">Auth loading</span>
+            </div>
+            <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle theme">
+                <span id="theme-icon">D</span>
+            </button>
+            <div class="rate-pill" id="rate-limit-pill" title="GitHub API rate limit">
+                <span class="live-dot"></span>
+                <span id="rate-limit-text">API --</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="sidebar-section">
+                <span class="section-label">Workspace</span>
+                <nav class="side-nav" aria-label="Dashboard tabs">
+                    <button class="nav-item active" data-tab="overview" type="button">
+                        <span class="nav-glyph">O</span>
+                        <span>Overview</span>
+                    </button>
+                    <button class="nav-item" data-tab="cicd" type="button">
+                        <span class="nav-glyph">C</span>
+                        <span>CI/CD</span>
+                    </button>
+                    <button class="nav-item" data-tab="deps" type="button">
+                        <span class="nav-glyph">D</span>
+                        <span>Deps</span>
+                    </button>
+                    <button class="nav-item" data-tab="pipeline" type="button">
+                        <span class="nav-glyph">P</span>
+                        <span>Pipeline Monitor</span>
+                    </button>
+                    <button class="nav-item" data-tab="setup" type="button">
+                        <span class="nav-glyph">S</span>
+                        <span>Repo Setup</span>
+                    </button>
+                    <button class="nav-item" data-tab="history" type="button">
+                        <span class="nav-glyph">H</span>
+                        <span>History</span>
+                        <span class="mini-count" id="history-count">0</span>
+                    </button>
+                </nav>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="section-row">
+                    <span class="section-label">Recent</span>
+                    <button class="text-btn" id="refresh-history-btn" type="button">Refresh</button>
+                </div>
+                <div class="recent-list" id="recent-list">
+                    <div class="recent-empty">No analyses yet.</div>
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="deploy-chip">
+                    <span class="live-dot"></span>
+                    <span>Production shell</span>
+                </div>
+            </div>
+        </aside>
+
+        <main class="workspace" id="workspace">
+            <section class="hero-panel" id="empty-state">
+                <div class="hero-copy">
+                    <span class="eyebrow">Developer Intelligence Platform</span>
+                    <h1>Repository intelligence command center.</h1>
+                    <p>Enter a repository above to stream metadata, CI/CD, dependency health, architecture, and history into one focused dashboard.</p>
+                </div>
+            </section>
+
+            <section class="command-center">
+                <div class="mode-tabs" role="tablist" aria-label="Analysis mode">
+                    <button class="mode-tab active" data-mode="single" type="button">Single Analysis</button>
+                    <button class="mode-tab" data-mode="batch" type="button">Batch Analysis</button>
+                </div>
+
+                <div class="single-panel analysis-mode-panel active" id="single-panel">
+                    <div class="input-help">
+                        Supports <code>owner/repo</code>, GitHub URLs, and <code>.git</code> URLs.
+                    </div>
+                    <div class="input-error" id="input-error" role="alert"></div>
+                </div>
+
+                <div class="batch-panel analysis-mode-panel" id="batch-panel">
+                    <div class="batch-toolbar">
+                        <span id="batch-preview">0 repositories queued</span>
+                        <input id="batch-file" type="file" accept=".txt" hidden>
+                        <button class="btn btn-secondary" id="batch-upload-btn" type="button">Upload .txt</button>
+                        <button class="btn btn-primary" id="batch-run-btn" type="button">Run Batch</button>
+                    </div>
+                    <textarea id="batch-input" rows="6" spellcheck="false" placeholder="fastapi/fastapi&#10;django/django&#10;https://github.com/pallets/flask.git"></textarea>
+                </div>
+            </section>
+
+            <section class="progress-panel" id="progress-panel" aria-live="polite">
+                <div class="panel-heading">
+                    <div>
+                        <span class="eyebrow">Live SSE Stream</span>
+                        <h2>Analysis pipeline</h2>
+                    </div>
+                    <span class="status-badge status-idle" id="overall-status">Idle</span>
+                </div>
+
+                <div class="module-row">
+                    <div class="module-chip waiting" data-module="metadata">
+                        <span class="module-dot"></span>
+                        <span>Metadata</span>
+                    </div>
+                    <div class="module-chip waiting" data-module="cicd">
+                        <span class="module-dot"></span>
+                        <span>CI/CD</span>
+                    </div>
+                    <div class="module-chip waiting" data-module="dependencies">
+                        <span class="module-dot"></span>
+                        <span>Dependencies</span>
+                    </div>
+                </div>
+
+                <div class="progress-track">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+
+                <div class="terminal" id="terminal-log"></div>
+                <div class="batch-progress-grid" id="batch-progress-grid"></div>
+            </section>
+
+            <section class="results-shell" id="results-shell">
+                <nav class="tabbar" aria-label="Result tabs">
+                    <button class="tab-btn active" data-tab="overview" type="button">Overview</button>
+                    <button class="tab-btn" data-tab="cicd" type="button">CI/CD</button>
+                    <button class="tab-btn" data-tab="deps" type="button">Dependencies</button>
+                    <button class="tab-btn" data-tab="pipeline" type="button">Pipeline Monitor</button>
+                    <button class="tab-btn" data-tab="setup" type="button">Repo Setup</button>
+                    <button class="tab-btn" data-tab="history" type="button">History</button>
+                </nav>
+
+                <section class="tab-panel active" id="tab-overview">
+                    <div id="overview-content" class="panel-content"></div>
+                </section>
+
+                <section class="tab-panel" id="tab-cicd">
+                    <div id="cicd-content" class="panel-content"></div>
+                </section>
+
+                <section class="tab-panel" id="tab-deps">
+                    <div id="deps-content" class="panel-content"></div>
+                </section>
+
+                <section class="tab-panel" id="tab-pipeline">
+                    <div id="pipeline-content" class="panel-content"></div>
+                </section>
+
+                <section class="tab-panel" id="tab-setup">
+                    <div id="setup-content" class="panel-content"></div>
+                </section>
+
+                <section class="tab-panel" id="tab-history">
+                    <div id="history-content" class="panel-content"></div>
+                </section>
+            </section>
+        </main>
+    </div>
+
+    <nav class="mobile-tabs" aria-label="Mobile dashboard tabs">
+        <button class="mobile-tab active" data-tab="overview" type="button">Overview</button>
+        <button class="mobile-tab" data-tab="cicd" type="button">CI/CD</button>
+        <button class="mobile-tab" data-tab="deps" type="button">Deps</button>
+        <button class="mobile-tab" data-tab="pipeline" type="button">Pipeline</button>
+        <button class="mobile-tab" data-tab="setup" type="button">Setup</button>
+        <button class="mobile-tab" data-tab="history" type="button">History</button>
+    </nav>
+    </div>
+
+    <div class="toast-stack" id="toast-stack"></div>
+    <div class="graph-tooltip" id="graph-tooltip" role="status"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
