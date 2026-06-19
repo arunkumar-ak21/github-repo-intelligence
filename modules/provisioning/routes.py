@@ -12,9 +12,12 @@ from modules.auth.service import AuthRequiredError, resolve_request_tenant
 from modules.provisioning.automation import run_installation_automation
 from modules.provisioning.service import (
     ProvisioningError,
+    deprovision_repository,
+    ignore_repository,
     provision_repository,
     redact_provisioning_result,
     repo_setup_dict,
+    restore_repository,
     verify_repository_setup,
 )
 from modules.quality.normalizer import normalize_repo_name, split_repo
@@ -199,8 +202,178 @@ async def verify_repo_setup(request: Request, repo_id: int):
         db.close()
 
 
+
+def _load_tenant_repo(db, tenant_id: int, repo_id: int) -> MonitoredRepository | None:
+    return (
+        db.query(MonitoredRepository)
+        .filter(MonitoredRepository.id == repo_id, MonitoredRepository.tenant_id == tenant_id)
+        .first()
+    )
+
+
+@router.post("/api/setup/repositories/{repo_id}/ignore")
+async def ignore_repo(request: Request, repo_id: int):
+    db = SessionLocal()
+    try:
+        tenant = resolve_request_tenant(db, request)
+        repo = _load_tenant_repo(db, tenant.id, repo_id)
+        if not repo:
+            return JSONResponse({"error": "Repository not found."}, status_code=404)
+        result = ignore_repository(db, repo)
+        db.commit()
+        return JSONResponse({"status": "ignored", "repo": repo_setup_dict(repo, _active_key(db, repo.id)), "result": result})
+    except AuthRequiredError as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=401)
+    except Exception as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        db.close()
+
+
+@router.post("/api/setup/repositories/{repo_id}/restore")
+async def restore_repo(request: Request, repo_id: int):
+    db = SessionLocal()
+    try:
+        tenant = resolve_request_tenant(db, request)
+        repo = _load_tenant_repo(db, tenant.id, repo_id)
+        if not repo:
+            return JSONResponse({"error": "Repository not found."}, status_code=404)
+        result = restore_repository(db, repo)
+        db.commit()
+        return JSONResponse({"status": "restored", "repo": repo_setup_dict(repo, _active_key(db, repo.id)), "result": result})
+    except AuthRequiredError as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=401)
+    except Exception as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        db.close()
+
+
+@router.post("/api/setup/repositories/{repo_id}/deprovision")
+async def deprovision_repo(request: Request, repo_id: int):
+    db = SessionLocal()
+    try:
+        tenant = resolve_request_tenant(db, request)
+        repo = _load_tenant_repo(db, tenant.id, repo_id)
+        if not repo:
+            return JSONResponse({"error": "Repository not found."}, status_code=404)
+        result = deprovision_repository(db, repo)
+        db.commit()
+        status = "cleanup_pull_request" if result.get("workflow_removal", {}).get("mode") == "pull_request" else "deprovisioned"
+        return JSONResponse({"status": status, "repo": repo_setup_dict(repo, _active_key(db, repo.id)), "result": redact_provisioning_result(result)})
+    except AuthRequiredError as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=401)
+    except ProvisioningError as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    except Exception as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        db.close()
+
+
+@router.post("/api/setup/repositories/bulk-configure")
+async def bulk_configure_repos(request: Request):
+    try:
+        body = await request.json()
+        repo_ids = [int(item) for item in body.get("repo_ids", [])]
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    db = SessionLocal()
+    try:
+        tenant = resolve_request_tenant(db, request)
+        results = []
+        for repo_id in repo_ids:
+            repo = _load_tenant_repo(db, tenant.id, repo_id)
+            if not repo:
+                results.append({"repo_id": repo_id, "status": "not_found"})
+                continue
+            try:
+                provisioned = provision_repository(db, repo)
+                results.append({"repo_id": repo_id, "status": "configured", "result": redact_provisioning_result(provisioned)})
+            except Exception as exc:
+                results.append({"repo_id": repo_id, "status": "failed", "error": str(exc)})
+        db.commit()
+        return JSONResponse({"status": "complete", "results": results})
+    except AuthRequiredError as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=401)
+    finally:
+        db.close()
+
+
+@router.post("/api/setup/repositories/bulk-ignore")
+async def bulk_ignore_repos(request: Request):
+    try:
+        body = await request.json()
+        repo_ids = [int(item) for item in body.get("repo_ids", [])]
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    db = SessionLocal()
+    try:
+        tenant = resolve_request_tenant(db, request)
+        updated = 0
+        for repo_id in repo_ids:
+            repo = _load_tenant_repo(db, tenant.id, repo_id)
+            if repo:
+                ignore_repository(db, repo)
+                updated += 1
+        db.commit()
+        return JSONResponse({"status": "ignored", "updated": updated})
+    except AuthRequiredError as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=401)
+    finally:
+        db.close()
+
+
+@router.post("/api/setup/repositories/bulk-deprovision")
+async def bulk_deprovision_repos(request: Request):
+    try:
+        body = await request.json()
+        repo_ids = [int(item) for item in body.get("repo_ids", [])]
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    db = SessionLocal()
+    try:
+        tenant = resolve_request_tenant(db, request)
+        results = []
+        for repo_id in repo_ids:
+            repo = _load_tenant_repo(db, tenant.id, repo_id)
+            if not repo:
+                results.append({"repo_id": repo_id, "status": "not_found"})
+                continue
+            try:
+                result = deprovision_repository(db, repo)
+                results.append({"repo_id": repo_id, "status": "deprovisioned", "result": redact_provisioning_result(result)})
+            except Exception as exc:
+                results.append({"repo_id": repo_id, "status": "failed", "error": str(exc)})
+        db.commit()
+        return JSONResponse({"status": "complete", "results": results})
+    except AuthRequiredError as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=401)
+    finally:
+        db.close()
+
+
 @router.post("/api/setup/sync-installed-repositories")
 async def sync_installed_repos(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    auto_provision = bool(body.get("auto_provision", False))
+
     db = SessionLocal()
     try:
         tenant = resolve_request_tenant(db, request)
@@ -230,7 +403,7 @@ async def sync_installed_repos(request: Request):
                 installation,
                 source="manual_sync",
                 auto_sync=True,
-                auto_provision=settings.AUTO_PROVISION_ON_SYNC,
+                auto_provision=auto_provision,
             )
             for installation in installations
         ]

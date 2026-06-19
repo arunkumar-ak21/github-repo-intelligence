@@ -1,4 +1,6 @@
 import { PipelineMonitorPanel } from "@/components/pipeline/pipeline-monitor";
+import { AnalysisHistoryPage } from "@/components/history/analysis-history-page";
+import { RepoSetupPanel as RepoSetupPanelV2 } from "@/components/setup/repo-setup-panel";
 import {
   DataTable as SharedDataTable,
   DetailDrawer as SharedDetailDrawer,
@@ -240,13 +242,52 @@ function scoreTone(score?: number | null) {
 function statusTone(status?: string | null) {
   const value = String(status || "").toLowerCase();
   if (["active", "provisioned", "completed", "passed", "success"].includes(value)) return "success";
-  if (["pending", "pending_pull_request", "dry_run", "needs_attention"].includes(value)) return "warning";
+  if (["pending", "pending_pull_request", "dry_run", "needs_attention", "discovered", "setup_pr_open", "cleanup_pr_open"].includes(value)) return "warning";
   if (["failed", "error", "blocked"].includes(value)) return "error";
+  if (["ignored", "removed", "deprovisioned", "deprovisioning"].includes(value)) return "info";
   return "info";
 }
 
 function humanize(value?: string | null) {
   return String(value || "unknown").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function safeUserMessage(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : "";
+  if (
+    message.includes("UNIQUE constraint failed") ||
+    message.includes("IntegrityError") ||
+    message.includes("SQLAlchemy") ||
+    message.includes("transaction has been rolled back") ||
+    message.includes("sqlite3")
+  ) {
+    return fallback;
+  }
+  return message || fallback;
+}
+
+type SyncInstallResult = {
+  status?: string;
+  installations?: Array<{
+    installation_id?: number | string;
+    synced_repository_count?: number;
+    synced_repositories?: number;
+    provisioned_repository_count?: number;
+    provisioned_repositories?: number;
+    skipped_repository_count?: number;
+    skipped_repositories?: number;
+    errors?: Array<{ stage?: string; message?: string }>;
+  }>;
+};
+
+function buildSyncMessage(result: SyncInstallResult) {
+  const installations = result.installations || [];
+  const synced = installations.reduce((total, item) => total + Number(item.synced_repository_count ?? item.synced_repositories ?? 0), 0);
+  const provisioned = installations.reduce((total, item) => total + Number(item.provisioned_repository_count ?? item.provisioned_repositories ?? 0), 0);
+  const errors = installations.reduce((total, item) => total + Number(item.errors?.length || 0), 0);
+  if (errors > 0) return `Repositories synced with ${errors} warning${errors === 1 ? "" : "s"}.`;
+  if (synced || provisioned) return `Repositories synced. ${synced} repo${synced === 1 ? "" : "s"} checked, ${provisioned} configured.`;
+  return "Repositories synced successfully.";
 }
 
 function normalizeTopics(value: unknown) {
@@ -1770,10 +1811,10 @@ function ecosystemFromSource(value: unknown) {
 function dependencyEcosystem(dep: any) {
   return String(
     dep.ecosystem ||
-      dep.package_manager ||
-      dep.manager ||
-      dep.language ||
-      ecosystemFromSource(dep.source_file || dep.file || dep.source),
+    dep.package_manager ||
+    dep.manager ||
+    dep.language ||
+    ecosystemFromSource(dep.source_file || dep.file || dep.source),
   );
 }
 
@@ -2088,6 +2129,22 @@ function RepoSetupPanel({
   const [busyRepo, setBusyRepo] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [registering, setRegistering] = useState(false);
+  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(new Set());
+
+  const selectedCount = selectedRepoIds.size;
+
+  function toggleRepo(repoId: number) {
+    setSelectedRepoIds((current) => {
+      const next = new Set(current);
+      if (next.has(repoId)) next.delete(repoId);
+      else next.add(repoId);
+      return next;
+    });
+  }
+
+  function toggleAllRepos(checked: boolean) {
+    setSelectedRepoIds(checked ? new Set(repos.map((repo) => repo.id)) : new Set());
+  }
 
   async function registerRepo(event: FormEvent) {
     event.preventDefault();
@@ -2112,11 +2169,11 @@ function RepoSetupPanel({
   async function syncRepos() {
     setSyncing(true);
     try {
-      const result = await apiPost<{ status: string }>("/api/setup/sync-installed-repositories", {});
-      onToast("success", `Sync ${result.status || "complete"}.`);
+      const result = await apiPost<SyncInstallResult>("/api/setup/sync-installed-repositories", { auto_provision: false });
+      onToast("success", buildSyncMessage(result));
       await onRefresh();
     } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "Sync failed.");
+      onToast("error", safeUserMessage(error, "Repository sync failed. Please retry after a few seconds."));
     } finally {
       setSyncing(false);
     }
@@ -2130,9 +2187,61 @@ function RepoSetupPanel({
       onToast("success", status);
       await onRefresh();
     } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "Provisioning failed.");
+      onToast("error", safeUserMessage(error, "Provisioning failed. Please retry or verify GitHub App permissions."));
     } finally {
       setBusyRepo(null);
+    }
+  }
+
+  async function repoAction(repo: SetupRepository, action: "ignore" | "restore" | "deprovision") {
+    const labels = { ignore: "ignored", restore: "restored", deprovision: "deprovisioned" };
+    if (action === "deprovision") {
+      const confirmed = window.confirm(
+        `Remove Arya setup from ${repo.full_name}?\n\nThis removes workflow/secrets/ruleset where GitHub permits it. Pipeline history is preserved.`
+      );
+      if (!confirmed) return;
+    }
+
+    setBusyRepo(repo.id);
+    try {
+      const result = await apiPost<any>(`/api/setup/repositories/${repo.id}/${action}`, {});
+      const prUrl = result?.repo?.cleanup_pr_url || result?.result?.workflow_removal?.pull_request_url;
+      if (action === "deprovision" && prUrl) {
+        onToast("warning", `Cleanup PR created for ${repo.full_name}. Merge it to remove the workflow.`);
+      } else {
+        onToast("success", `${repo.full_name} ${labels[action]}.`);
+      }
+      await onRefresh();
+    } catch (error) {
+      onToast("error", safeUserMessage(error, `${humanize(action)} failed. Please retry.`));
+    } finally {
+      setBusyRepo(null);
+    }
+  }
+
+  async function bulkAction(action: "configure" | "ignore" | "deprovision") {
+    if (!selectedCount) {
+      onToast("warning", "Select at least one repository first.");
+      return;
+    }
+    if (action === "deprovision") {
+      const confirmed = window.confirm(
+        `Remove Arya setup from ${selectedCount} selected repo${selectedCount === 1 ? "" : "s"}? Pipeline history will be preserved.`
+      );
+      if (!confirmed) return;
+    }
+
+    setSyncing(true);
+    try {
+      const endpoint = action === "configure" ? "bulk-configure" : action === "ignore" ? "bulk-ignore" : "bulk-deprovision";
+      await apiPost(`/api/setup/repositories/${endpoint}`, { repo_ids: [...selectedRepoIds] });
+      onToast("success", `${humanize(action)} completed for ${selectedCount} repo${selectedCount === 1 ? "" : "s"}.`);
+      setSelectedRepoIds(new Set());
+      await onRefresh();
+    } catch (error) {
+      onToast("error", safeUserMessage(error, `${humanize(action)} failed. Please retry.`));
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -2185,11 +2294,36 @@ function RepoSetupPanel({
         </Button>
       </form>
 
+      <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 bg-white p-4 md:flex-row md:items-center md:justify-between">
+        <div className="text-sm text-zinc-600">
+          {selectedCount ? `${selectedCount} selected` : "Select repositories to configure, ignore, or undo setup."}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => void bulkAction("configure")} disabled={!selectedCount || syncing}>
+            Configure selected
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void bulkAction("ignore")} disabled={!selectedCount || syncing}>
+            Ignore selected
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void bulkAction("deprovision")} disabled={!selectedCount || syncing}>
+            Undo setup
+          </Button>
+        </div>
+      </div>
+
       <Card>
         <CardContent className="overflow-x-auto p-0">
-          <table className="w-full min-w-[1100px] text-left text-sm">
+          <table className="w-full min-w-[1220px] text-left text-sm">
             <thead className="border-b border-zinc-200 bg-zinc-50 text-xs uppercase tracking-wide text-zinc-600">
               <tr>
+                <th className="px-4 py-3">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all repositories"
+                    checked={repos.length > 0 && selectedRepoIds.size === repos.length}
+                    onChange={(event) => toggleAllRepos(event.currentTarget.checked)}
+                  />
+                </th>
                 <th className="px-4 py-3">Repository</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">API Key</th>
@@ -2202,7 +2336,23 @@ function RepoSetupPanel({
             <tbody>
               {repos.length ? repos.map((repo) => (
                 <tr key={repo.id} className="border-b border-zinc-100 align-top">
-                  <td className="px-4 py-4 font-mono font-semibold">{repo.full_name}</td>
+                  <td className="px-4 py-4">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${repo.full_name}`}
+                      checked={selectedRepoIds.has(repo.id)}
+                      onChange={() => toggleRepo(repo.id)}
+                    />
+                  </td>
+                  <td className="px-4 py-4 font-mono font-semibold">
+                    {repo.full_name}
+                    {repo.cleanup_pr_url ? (
+                      <a className="mt-2 block text-xs font-sans text-blue-600 hover:underline" href={repo.cleanup_pr_url} target="_blank" rel="noreferrer">Cleanup PR #{repo.cleanup_pr_number}</a>
+                    ) : null}
+                    {repo.setup_pr_url ? (
+                      <a className="mt-2 block text-xs font-sans text-blue-600 hover:underline" href={repo.setup_pr_url} target="_blank" rel="noreferrer">Setup PR #{repo.setup_pr_number}</a>
+                    ) : null}
+                  </td>
                   <td className="px-4 py-4">
                     <Pill themed>
                       <PillIndicator variant={statusTone(repo.setup_status)} />
@@ -2215,14 +2365,29 @@ function RepoSetupPanel({
                   <td className="px-4 py-4"><Pill themed><PillIndicator variant={repo.secrets_configured_at ? "success" : "warning"} />{repo.secrets_configured_at ? formatDate(repo.secrets_configured_at) : "Pending"}</Pill></td>
                   <td className="px-4 py-4"><Pill themed><PillIndicator variant={repo.ruleset_configured_at ? "success" : "warning"} />{repo.ruleset_configured_at ? formatDate(repo.ruleset_configured_at) : "Pending"}</Pill></td>
                   <td className="px-4 py-4">
-                    <Button size="sm" variant="outline" onClick={() => void provision(repo)} disabled={busyRepo === repo.id}>
-                      {busyRepo === repo.id ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Play className="mr-2 size-4" />}
-                      Configure
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" onClick={() => void provision(repo)} disabled={busyRepo === repo.id || repo.setup_status === "ignored" || repo.setup_status === "deprovisioned"}>
+                        {busyRepo === repo.id ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Play className="mr-2 size-4" />}
+                        Configure
+                      </Button>
+                      {repo.setup_status === "ignored" || repo.setup_status === "deprovisioned" ? (
+                        <Button size="sm" variant="outline" onClick={() => void repoAction(repo, "restore")} disabled={busyRepo === repo.id}>
+                          Restore
+                        </Button>
+                      ) : (
+                        <Button size="sm" variant="outline" onClick={() => void repoAction(repo, "ignore")} disabled={busyRepo === repo.id}>
+                          Ignore
+                        </Button>
+                      )}
+                      <Button size="sm" variant="outline" onClick={() => void repoAction(repo, "deprovision")} disabled={busyRepo === repo.id}>
+                        <Trash2 className="mr-2 size-4" />
+                        Undo
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               )) : (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-zinc-600">No monitored repositories yet. Install the GitHub App and sync selected repos.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-zinc-600">No monitored repositories yet. Install the GitHub App and sync selected repos.</td></tr>
               )}
             </tbody>
           </table>
@@ -3278,8 +3443,8 @@ export default function App() {
           {activeTab === "cicd" ? <CicdPanel data={analysis} /> : null}
           {activeTab === "deps" ? <DependenciesPanel data={analysis} /> : null}
           {activeTab === "pipeline" ? <PipelineMonitorPanel /> : null}
-          {activeTab === "setup" ? <RepoSetupPanel repos={setupRepos} auth={auth} onRefresh={loadSetupRepos} onToast={showToast} /> : null}
-          {activeTab === "history" ? <HistoryPanel history={historyItems} onOpen={openHistory} onDelete={deleteHistory} onClear={clearHistory} /> : null}
+          {activeTab === "setup" ? <RepoSetupPanelV2 repos={setupRepos} auth={auth} onRefresh={loadSetupRepos} onToast={showToast} /> : null}
+          {activeTab === "history" ? <AnalysisHistoryPage history={historyItems} onOpen={openHistory} onDelete={deleteHistory} onClear={clearHistory} onToast={showToast} /> : null}
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />

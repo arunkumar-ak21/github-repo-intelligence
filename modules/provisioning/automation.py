@@ -69,21 +69,40 @@ def run_installation_automation(
         result["synced_repository_count"] = len(repositories) if should_sync else 0
     except Exception as exc:
         result["errors"].append({"stage": "sync", "message": str(exc)})
-        record_audit_event(
-            db,
-            tenant_id=installation.tenant_id,
-            user_id=user_id,
-            event_type="github_installation_automation_failed",
-            target_type="installation",
-            target_id=str(installation.installation_id),
-            metadata=result,
-        )
+
+        # Important: IntegrityError/flush failures leave the SQLAlchemy session
+        # unusable until rollback.  Roll back before trying to write the audit
+        # event, otherwise the user sees the noisy "transaction has been rolled
+        # back" error instead of the real sync problem.
+        tenant_id = installation.tenant_id
+        installation_id = installation.installation_id
+        db.rollback()
+
+        try:
+            record_audit_event(
+                db,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="github_installation_automation_failed",
+                target_type="installation",
+                target_id=str(installation_id),
+                metadata=result,
+            )
+            db.flush()
+        except Exception:
+            db.rollback()
         return result
 
     for repo in repositories:
         repo_result: dict[str, Any] = {"repo": repo_setup_dict(repo)}
         if not should_provision:
             repo_result["status"] = "synced"
+            result["repositories"].append(repo_result)
+            continue
+
+        if repo.setup_status in {"ignored", "deprovisioning", "deprovisioned", "cleanup_pr_open", "setup_pr_open", "removed"}:
+            repo_result["status"] = f"skipped_{repo.setup_status}"
+            result["skipped_repository_count"] += 1
             result["repositories"].append(repo_result)
             continue
 

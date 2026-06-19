@@ -33,6 +33,20 @@ export type PipelineStage = {
   duration_ms?: number | null;
   summary?: SeveritySummary;
   artifacts?: Record<string, unknown>;
+  findings?: PipelineStageFinding[];
+};
+
+export type PipelineStageFinding = {
+  id?: number;
+  scanner?: string | null;
+  severity?: string | null;
+  rule_id?: string | null;
+  title?: string | null;
+  message?: string | null;
+  file_path?: string | null;
+  line_number?: number | null;
+  recommendation?: string | null;
+  created_at?: string | null;
 };
 
 export type PipelineRun = {
@@ -50,6 +64,7 @@ export type PipelineRun = {
   completed_at?: string | null;
   created_at?: string | null;
   stages?: PipelineStage[];
+  quality_findings?: PipelineStageFinding[];
   quality_summary?: SeveritySummary;
   quality_artifacts?: Record<string, unknown>;
 };
@@ -128,6 +143,19 @@ export type SetupRepository = {
   secrets_configured_at?: string | null;
   ruleset_configured_at?: string | null;
   last_setup_error?: string | null;
+  ignored_at?: string | null;
+  deprovisioned_at?: string | null;
+  setup_pr_number?: number | null;
+  setup_pr_url?: string | null;
+  setup_pr_branch?: string | null;
+  cleanup_pr_number?: number | null;
+  cleanup_pr_url?: string | null;
+  cleanup_pr_branch?: string | null;
+  last_sync_at?: string | null;
+  last_verified_at?: string | null;
+  last_deprovision_error?: string | null;
+  provisioning_ready?: boolean;
+  provisioning_blockers?: string[];
   api_key_prefix?: string | null;
   created_at?: string | null;
 };

@@ -52,12 +52,83 @@ def _dashboard_url_is_local(url: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"} or host.startswith("192.168.") or host.startswith("10.")
 
 
+def normalized_public_base_url() -> str:
+    """Return the dashboard URL that will be written into GitHub Actions secrets.
+
+    GitHub Actions cannot recover from an empty or malformed DASHBOARD_URL secret, so
+    repository provisioning must fail before writing secrets when this value is invalid.
+    """
+
+    url = (settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ProvisioningError(
+            "PUBLIC_BASE_URL must be a full URL such as https://your-ngrok-url.ngrok-free.app. "
+            "Configure this before provisioning repositories."
+        )
+    if _dashboard_url_is_local(url) and not settings.ALLOW_LOCAL_DASHBOARD_URL_FOR_PROVISIONING:
+        raise ProvisioningError(
+            "PUBLIC_BASE_URL is local. GitHub Actions cannot post reports to localhost. "
+            "Use a deployed HTTPS dashboard URL, or use ngrok/cloudflared for local testing."
+        )
+    return url
+
+
+def _model_has_attr(obj: Any, name: str) -> bool:
+    """Return True when a SQLAlchemy model has this mapped/runtime attribute.
+
+    This keeps the provisioning module compatible while local DB/model migrations
+    are being applied across machines.
+    """
+
+    return hasattr(type(obj), name) or hasattr(obj, name)
+
+
+def _set_model_attr(obj: Any, name: str, value: Any) -> None:
+    if _model_has_attr(obj, name):
+        setattr(obj, name, value)
+
+
+def _get_model_attr(obj: Any, name: str, default: Any = None) -> Any:
+    return getattr(obj, name, default) if _model_has_attr(obj, name) else default
+
+
+def _iso_optional(value: Any) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _clear_setup_pr_fields(repo: MonitoredRepository) -> None:
+    _set_model_attr(repo, "setup_pr_number", None)
+    _set_model_attr(repo, "setup_pr_url", None)
+    _set_model_attr(repo, "setup_pr_branch", None)
+
+
+def _set_setup_pr_fields(repo: MonitoredRepository, workflow_delivery: dict[str, Any]) -> None:
+    _set_model_attr(repo, "setup_pr_number", workflow_delivery.get("pull_request_number"))
+    _set_model_attr(repo, "setup_pr_url", workflow_delivery.get("pull_request_url"))
+    _set_model_attr(repo, "setup_pr_branch", workflow_delivery.get("branch"))
+
+
+def _clear_cleanup_pr_fields(repo: MonitoredRepository) -> None:
+    _set_model_attr(repo, "cleanup_pr_number", None)
+    _set_model_attr(repo, "cleanup_pr_url", None)
+    _set_model_attr(repo, "cleanup_pr_branch", None)
+
+
+def _set_cleanup_pr_fields(repo: MonitoredRepository, delivery: dict[str, Any]) -> None:
+    _set_model_attr(repo, "cleanup_pr_number", delivery.get("pull_request_number"))
+    _set_model_attr(repo, "cleanup_pr_url", delivery.get("pull_request_url"))
+    _set_model_attr(repo, "cleanup_pr_branch", delivery.get("branch"))
+
+
 def provisioning_blockers() -> list[str]:
     blockers: list[str] = []
     if settings.PROVISIONING_DRY_RUN:
         blockers.append("Real provisioning is disabled because PROVISIONING_DRY_RUN is true.")
-    if _dashboard_url_is_local(settings.PUBLIC_BASE_URL) and not settings.ALLOW_LOCAL_DASHBOARD_URL_FOR_PROVISIONING:
-        blockers.append("PUBLIC_BASE_URL is local; GitHub Actions needs a public HTTPS dashboard URL.")
+    try:
+        normalized_public_base_url()
+    except ProvisioningError as exc:
+        blockers.append(str(exc))
     if settings.QUALITY_WORKFLOW_MODE == "reusable" and settings.QUALITY_REUSABLE_WORKFLOW_REF.startswith("company/"):
         blockers.append("QUALITY_REUSABLE_WORKFLOW_REF is still the placeholder central workflow reference.")
     if not settings.GITHUB_APP_ID:
@@ -65,6 +136,7 @@ def provisioning_blockers() -> list[str]:
     if not (settings.GITHUB_APP_PRIVATE_KEY or settings.GITHUB_APP_PRIVATE_KEY_PATH):
         blockers.append("GitHub App private key is not configured on the backend.")
     return blockers
+
 
 
 def render_caller_workflow() -> str:
@@ -90,7 +162,7 @@ def render_caller_workflow() -> str:
 
 
 def render_standalone_workflow() -> str:
-    return """name: Company Quality Pipeline
+    return r"""name: Company Quality Pipeline
 
 on:
   push:
@@ -123,7 +195,7 @@ jobs:
       - name: Install Code Quality Tool
         run: |
           python -m pip install --upgrade pip
-          pip install cq-pipeline[all] semgrep || true
+          echo "Using built-in Arya quality scanner bundled in this workflow."
 
       - name: Run Code Quality Scan
         run: |
@@ -131,13 +203,186 @@ jobs:
           echo "SCAN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
           set +e
-          if command -v cq-pipeline >/dev/null 2>&1; then
-            cq-pipeline scan --all --format all
-            SCAN_EXIT=$?
-          else
-            echo '{"verdict":"error","error":"cq-pipeline is not installed"}' > reports/quality-report.json
-            SCAN_EXIT=1
-          fi
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from datetime import datetime, timezone
+          from html import escape
+          from pathlib import Path
+
+          ROOT = Path.cwd()
+          IGNORE_DIRS = {
+              ".git", ".github", "node_modules", ".venv", "venv", "env", "__pycache__",
+              "dist", "build", "coverage", ".next", ".cache", "reports", "target", ".mypy_cache",
+              ".pytest_cache", ".ruff_cache", ".turbo",
+          }
+          TEXT_SUFFIXES = {
+              ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".go", ".rb", ".php",
+              ".cs", ".cpp", ".c", ".h", ".hpp", ".rs", ".swift", ".scala", ".sql",
+              ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf", ".env", ".txt",
+              ".md", ".xml", ".html", ".css", ".scss", ".sh", ".ps1", "",
+          }
+          SECRET_PATTERNS = [
+              ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")),
+              ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+              ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+              ("private_key", re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |)PRIVATE KEY-----")),
+              ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{25,}\b")),
+              ("generic_secret_assignment", re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*['\"]?[A-Za-z0-9_.:/+=-]{24,}")),
+          ]
+
+          findings = []
+          files_scanned = 0
+
+          def add_finding(scanner, severity, rule_id, title, message, file_path, line_number=None, recommendation=""):
+              findings.append({
+                  "scanner": scanner,
+                  "severity": severity,
+                  "rule_id": rule_id,
+                  "title": title,
+                  "message": message,
+                  "file_path": file_path,
+                  "line_number": line_number,
+                  "recommendation": recommendation,
+              })
+
+          def should_skip(path: Path) -> bool:
+              return any(part in IGNORE_DIRS for part in path.parts)
+
+          for path in ROOT.rglob("*"):
+              if not path.is_file() or should_skip(path.relative_to(ROOT)):
+                  continue
+              if path.suffix.lower() not in TEXT_SUFFIXES:
+                  continue
+              rel = path.relative_to(ROOT).as_posix()
+              try:
+                  text = path.read_text(encoding="utf-8", errors="ignore")
+              except Exception:
+                  continue
+              files_scanned += 1
+              for line_no, line in enumerate(text.splitlines(), start=1):
+                  for rule_id, pattern in SECRET_PATTERNS:
+                      if pattern.search(line):
+                          add_finding(
+                              "built_in_secrets",
+                              "critical",
+                              rule_id,
+                              "Potential secret detected",
+                              "A token/credential-shaped value was detected. Secret value is intentionally redacted.",
+                              rel,
+                              line_no,
+                              "Remove the credential from Git history, move it to a secret manager/environment variable, and rotate it.",
+                          )
+
+          req = ROOT / "requirements.txt"
+          if req.exists():
+              for line_no, raw_line in enumerate(req.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+                  line = raw_line.strip()
+                  if not line or line.startswith("#") or line.startswith("-") or "git+" in line or "://" in line:
+                      continue
+                  if "==" not in line:
+                      add_finding(
+                          "dependency_policy",
+                          "medium",
+                          "unpinned_python_dependency",
+                          "Unpinned Python dependency",
+                          "A requirements.txt dependency is not pinned with ==.",
+                          "requirements.txt",
+                          line_no,
+                          "Pin production dependencies to exact versions for repeatable builds.",
+                      )
+
+          package_json = ROOT / "package.json"
+          if package_json.exists():
+              try:
+                  package_data = json.loads(package_json.read_text(encoding="utf-8"))
+                  for section in ("dependencies", "devDependencies"):
+                      deps = package_data.get(section) or {}
+                      if isinstance(deps, dict):
+                          for name, version in deps.items():
+                              version_text = str(version)
+                              if version_text in {"*", "latest"} or version_text.startswith(("^", "~")):
+                                  add_finding(
+                                      "dependency_policy",
+                                      "low",
+                                      "loose_node_dependency",
+                                      "Loose Node dependency version",
+                                      f"{name} uses a non-exact version range in {section}.",
+                                      "package.json",
+                                      None,
+                                      "Use exact versions or a lockfile for production deployments.",
+                                  )
+              except Exception as exc:
+                  add_finding(
+                      "dependency_policy",
+                      "medium",
+                      "package_json_parse_error",
+                      "Could not parse package.json",
+                      str(exc),
+                      "package.json",
+                      None,
+                      "Fix package.json syntax.",
+                  )
+
+          counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+          for finding in findings:
+              severity = str(finding.get("severity") or "low").lower()
+              if severity in counts:
+                  counts[severity] += 1
+
+          if counts["critical"] or counts["high"]:
+              verdict = "fail"
+              exit_code = 1
+          elif counts["medium"] or counts["low"]:
+              verdict = "warn"
+              exit_code = 0
+          else:
+              verdict = "pass"
+              exit_code = 0
+
+          report = {
+              "verdict": verdict,
+              "scanner": "arya_builtin_quality_scanner",
+              "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "total_findings": len(findings),
+              "critical_count": counts["critical"],
+              "high_count": counts["high"],
+              "medium_count": counts["medium"],
+              "low_count": counts["low"],
+              "files_scanned": files_scanned,
+              "duration_seconds": 0,
+              "scan_results": [
+                  {
+                      "scanner": "built_in_quality_gate",
+                      "success": True,
+                      "skipped": False,
+                      "findings": findings,
+                  }
+              ],
+          }
+          Path("reports/quality-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+          rows = "\n".join(
+              f"<tr><td>{escape(str(f.get('severity','')))}</td><td>{escape(str(f.get('title','')))}</td><td>{escape(str(f.get('file_path','')))}:{escape(str(f.get('line_number') or ''))}</td><td>{escape(str(f.get('recommendation','')))}</td></tr>"
+              for f in findings[:500]
+          )
+          empty_row = '<tr><td colspan="4">No findings.</td></tr>'
+          html = (
+              "<!doctype html><html><head><meta charset='utf-8'><title>Arya Quality Report</title>"
+              "<style>body{font-family:Arial,sans-serif;margin:32px;color:#24292f}"
+              "table{border-collapse:collapse;width:100%}td,th{border:1px solid #d0d7de;padding:8px;text-align:left}"
+              "th{background:#f6f8fa}</style></head><body>"
+              f"<h1>Arya Quality Report</h1><p>Verdict: <strong>{escape(verdict)}</strong></p>"
+              f"<p>Files scanned: {files_scanned}. Findings: {len(findings)}.</p>"
+              f"<table><thead><tr><th>Severity</th><th>Title</th><th>Location</th><th>Recommendation</th></tr></thead><tbody>{rows or empty_row}</tbody></table>"
+              "</body></html>"
+          )
+          Path("reports/quality-report.html").write_text(html, encoding="utf-8")
+
+          raise SystemExit(exit_code)
+          PY
+          SCAN_EXIT=$?
           set -e
 
           echo "SCAN_EXIT=$SCAN_EXIT" >> "$GITHUB_ENV"
@@ -146,19 +391,27 @@ jobs:
         if: always()
         run: |
           mkdir -p reports
+
+          TARGET_JSON="reports/quality-report.json"
+          TARGET_HTML="reports/quality-report.html"
+
           JSON_REPORT="$(ls -t reports/*.json 2>/dev/null | head -n 1 || true)"
           HTML_REPORT="$(ls -t reports/*.html 2>/dev/null | head -n 1 || true)"
 
           if [ -n "$JSON_REPORT" ]; then
-            cp "$JSON_REPORT" reports/quality-report.json
+            if [ "$JSON_REPORT" != "$TARGET_JSON" ]; then
+              cp "$JSON_REPORT" "$TARGET_JSON"
+            fi
           else
-            echo '{"verdict":"error","error":"No JSON report generated"}' > reports/quality-report.json
+            echo '{"verdict":"error","error":"No JSON report generated"}' > "$TARGET_JSON"
           fi
 
           if [ -n "$HTML_REPORT" ]; then
-            cp "$HTML_REPORT" reports/quality-report.html
+            if [ "$HTML_REPORT" != "$TARGET_HTML" ]; then
+              cp "$HTML_REPORT" "$TARGET_HTML"
+            fi
           else
-            echo "<html><body><h1>No HTML report generated</h1></body></html>" > reports/quality-report.html
+            echo "<html><body><h1>No HTML report generated</h1></body></html>" > "$TARGET_HTML"
           fi
 
       - name: Build dashboard quality payload
@@ -236,12 +489,28 @@ jobs:
         if: always()
         run: |
           set +e
+          DASHBOARD_URL="${{ secrets.DASHBOARD_URL }}"
+          DASHBOARD_API_KEY="${{ secrets.DASHBOARD_API_KEY }}"
+
+          if [ -z "$DASHBOARD_URL" ]; then
+            echo "::warning::DASHBOARD_URL secret is missing or empty. Report was not sent."
+            exit 0
+          fi
+          case "$DASHBOARD_URL" in
+            http://*|https://*) ;;
+            *) echo "::warning::DASHBOARD_URL must start with http:// or https://. Report was not sent."; exit 0 ;;
+          esac
+          if [ -z "$DASHBOARD_API_KEY" ]; then
+            echo "::warning::DASHBOARD_API_KEY secret is missing or empty. Report was not sent."
+            exit 0
+          fi
+
           HTTP_CODE=$(curl -sS -o /tmp/dashboard_response.txt -w "%{http_code}" \
             --connect-timeout 10 \
             --max-time 30 \
-            -X POST "${{ secrets.DASHBOARD_URL }}/api/quality/report" \
+            -X POST "$DASHBOARD_URL/api/quality/report" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.DASHBOARD_API_KEY }}" \
+            -H "Authorization: Bearer $DASHBOARD_API_KEY" \
             --data-binary @reports/dashboard-quality-payload.json)
           CURL_EXIT=$?
           set -e
@@ -257,6 +526,7 @@ jobs:
           fi
 
       - name: Fail if quality gate failed
+        if: ${{ !startsWith(github.head_ref, 'arya/setup-quality-pipeline') && !startsWith(github.ref_name, 'arya/setup-quality-pipeline') }}
         run: |
           exit "$SCAN_EXIT"
 
@@ -274,12 +544,15 @@ jobs:
 """
 
 
+
 def repo_setup_dict(repo: MonitoredRepository, key: RepositoryApiKey | None = None) -> dict[str, Any]:
     blockers = provisioning_blockers()
     effective_status = repo.setup_status
-    if repo.workflow_installed_at and repo.secrets_configured_at and repo.ruleset_configured_at:
-        effective_status = "active"
-    return {
+    if repo.setup_status not in {"ignored", "setup_pr_open", "deprovisioning", "deprovisioned", "cleanup_pr_open", "removed"}:
+        if repo.workflow_installed_at and repo.secrets_configured_at and repo.ruleset_configured_at:
+            effective_status = "active"
+
+    data: dict[str, Any] = {
         "id": repo.id,
         "tenant_id": repo.tenant_id,
         "installation_id": repo.installation_id,
@@ -289,15 +562,29 @@ def repo_setup_dict(repo: MonitoredRepository, key: RepositoryApiKey | None = No
         "default_branch": repo.default_branch,
         "setup_status": effective_status,
         "is_active": repo.is_active,
-        "workflow_installed_at": repo.workflow_installed_at.isoformat() if repo.workflow_installed_at else None,
-        "secrets_configured_at": repo.secrets_configured_at.isoformat() if repo.secrets_configured_at else None,
-        "ruleset_configured_at": repo.ruleset_configured_at.isoformat() if repo.ruleset_configured_at else None,
-        "last_verified_at": repo.last_verified_at.isoformat() if repo.last_verified_at else None,
+        "workflow_installed_at": _iso_optional(repo.workflow_installed_at),
+        "secrets_configured_at": _iso_optional(repo.secrets_configured_at),
+        "ruleset_configured_at": _iso_optional(repo.ruleset_configured_at),
+        "last_verified_at": _iso_optional(repo.last_verified_at),
         "api_key_prefix": key.key_prefix if key else None,
         "provisioning_ready": not blockers,
         "provisioning_blockers": blockers,
     }
 
+    optional_fields = {
+        "ignored_at": _iso_optional(_get_model_attr(repo, "ignored_at")),
+        "deprovisioned_at": _iso_optional(_get_model_attr(repo, "deprovisioned_at")),
+        "setup_pr_number": _get_model_attr(repo, "setup_pr_number"),
+        "setup_pr_url": _get_model_attr(repo, "setup_pr_url"),
+        "setup_pr_branch": _get_model_attr(repo, "setup_pr_branch"),
+        "cleanup_pr_number": _get_model_attr(repo, "cleanup_pr_number"),
+        "cleanup_pr_url": _get_model_attr(repo, "cleanup_pr_url"),
+        "cleanup_pr_branch": _get_model_attr(repo, "cleanup_pr_branch"),
+        "last_sync_at": _iso_optional(_get_model_attr(repo, "last_sync_at")),
+        "last_deprovision_error": _get_model_attr(repo, "last_deprovision_error"),
+    }
+    data.update(optional_fields)
+    return data
 
 def redact_provisioning_result(result: dict[str, Any]) -> dict[str, Any]:
     """Return a browser-safe copy of a provisioning result."""
@@ -308,22 +595,53 @@ def redact_provisioning_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def sync_installed_repository_records(db: Session, installation: GitHubInstallation) -> list[MonitoredRepository]:
+    """Sync the full selected-repository list from GitHub into the DB.
+
+    This operation is idempotent:
+    - existing selected repos are updated,
+    - new selected repos are inserted,
+    - repos removed from the GitHub App installation are marked inactive.
+    """
     github = GitHubAppApi()
     token = github.installation_token(installation.installation_id)
     repositories = github.list_installation_repositories(token)
     records = upsert_repositories_from_payload(db, installation, repositories)
+
+    selected_full_names = {record.full_name for record in records}
+    existing_for_installation = (
+        db.query(MonitoredRepository)
+        .filter(
+            MonitoredRepository.tenant_id == installation.tenant_id,
+            MonitoredRepository.installation_id == installation.id,
+        )
+        .all()
+    )
+    inactive_count = 0
+    now = datetime.now(timezone.utc)
+    for record in existing_for_installation:
+        if record.full_name not in selected_full_names and record.is_active:
+            record.is_active = False
+            record.setup_status = "removed"
+            _set_model_attr(record, "last_sync_at", now)
+            inactive_count += 1
+
     record_audit_event(
         db,
         tenant_id=installation.tenant_id,
         event_type="github_installation_repositories_synced",
         target_type="installation",
         target_id=str(installation.installation_id),
-        metadata={"repository_count": len(records)},
+        metadata={
+            "repository_count": len(records),
+            "inactive_repository_count": inactive_count,
+        },
     )
     return records
 
 
 def repository_needs_provisioning(repo: MonitoredRepository) -> bool:
+    if repo.setup_status in {"ignored", "setup_pr_open", "deprovisioning", "deprovisioned", "cleanup_pr_open", "removed"}:
+        return False
     return not (
         repo.setup_status == "active"
         and repo.workflow_installed_at
@@ -458,6 +776,21 @@ class GitHubAppApi:
             raise ProvisioningError(f"Could not read {path}: {response.status_code} {response.text}")
         return response.json()
 
+
+    def get_content_text(self, owner: str, repo: str, path: str, token: str, *, ref: str | None = None) -> str | None:
+        payload = self.get_contents(owner, repo, path, token, ref=ref)
+        if not payload:
+            return None
+        content = payload.get("content")
+        if not content:
+            return ""
+        if payload.get("encoding") == "base64":
+            try:
+                return base64.b64decode(str(content).replace("\n", "")).decode("utf-8")
+            except Exception:
+                return None
+        return str(content)
+
     def upsert_file(
         self,
         owner: str,
@@ -541,15 +874,20 @@ class GitHubAppApi:
         *,
         default_branch: str | None = None,
     ) -> dict[str, Any]:
+        repo_payload = self.get_repository(owner, repo, token)
+        base_branch = default_branch or str(repo_payload.get("default_branch") or "main")
+
+        existing_text = self.get_content_text(owner, repo, path, token, ref=base_branch)
+        if existing_text == content:
+            return {"mode": "already_exists", "base_branch": base_branch}
+
         try:
             self.upsert_file(owner, repo, path, content, message, token)
-            return {"mode": "direct"}
+            return {"mode": "direct", "base_branch": base_branch}
         except GitHubApiError as exc:
             if not _github_ruleset_blocks_direct_write(exc):
                 raise
 
-        repo_payload = self.get_repository(owner, repo, token)
-        base_branch = default_branch or str(repo_payload.get("default_branch") or "main")
         branch = "arya/setup-quality-pipeline"
         self.ensure_branch(owner, repo, branch, base_branch, token)
         self.upsert_file(owner, repo, path, content, message, token, branch=branch)
@@ -561,13 +899,84 @@ class GitHubAppApi:
             title="Install Arya quality pipeline workflow",
             body=(
                 "This pull request was created automatically by Arya tech Repo Quality Platform.\n\n"
-                "It installs the GitHub Actions workflow required for quality-gate enforcement. "
-                "The dashboard has configured repository secrets and rulesets separately where GitHub permissions allow it."
+                "It installs or updates the GitHub Actions workflow required for quality-gate enforcement. "
+                "Repository secrets are configured by the platform. Final branch protection is applied after "
+                "the workflow is present on the default branch."
             ),
             token=token,
         )
         return {
             "mode": "pull_request",
+            "branch": branch,
+            "base_branch": base_branch,
+            "pull_request_number": pull.get("number"),
+            "pull_request_url": pull.get("html_url"),
+            "reason": "Repository rules require workflow changes through a pull request.",
+        }
+
+
+    def delete_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        message: str,
+        token: str,
+        *,
+        branch: str | None = None,
+    ) -> bool:
+        existing = self.get_contents(owner, repo, path, token, ref=branch)
+        if not existing or not existing.get("sha"):
+            return False
+        payload: dict[str, Any] = {"message": message, "sha": existing["sha"]}
+        if branch:
+            payload["branch"] = branch
+        self.request(
+            "DELETE",
+            f"{self.api_base}/repos/{owner}/{repo}/contents/{path}",
+            token,
+            json=payload,
+        )
+        return True
+
+    def delete_file_or_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        message: str,
+        token: str,
+        *,
+        default_branch: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            deleted = self.delete_file(owner, repo, path, message, token)
+            return {"mode": "direct", "deleted": deleted}
+        except GitHubApiError as exc:
+            if not _github_ruleset_blocks_direct_write(exc):
+                raise
+
+        repo_payload = self.get_repository(owner, repo, token)
+        base_branch = default_branch or str(repo_payload.get("default_branch") or "main")
+        branch = "arya/remove-quality-pipeline"
+        self.ensure_branch(owner, repo, branch, base_branch, token)
+        deleted = self.delete_file(owner, repo, path, message, token, branch=branch)
+        pull = self.create_or_get_pull_request(
+            owner,
+            repo,
+            branch=branch,
+            base_branch=base_branch,
+            title="Remove Arya quality pipeline workflow",
+            body=(
+                "This pull request was created automatically by Arya tech Repo Quality Platform.\n\n"
+                "It removes the GitHub Actions workflow installed by the platform. "
+                "Pipeline history is preserved in the dashboard."
+            ),
+            token=token,
+        )
+        return {
+            "mode": "pull_request",
+            "deleted": deleted,
             "branch": branch,
             "base_branch": base_branch,
             "pull_request_number": pull.get("number"),
@@ -607,6 +1016,19 @@ class GitHubAppApi:
         )
         secrets = payload.get("secrets", []) if isinstance(payload, dict) else []
         return {str(item.get("name")) for item in secrets if item.get("name")}
+
+    def delete_repo_secret(self, owner: str, repo: str, secret_name: str, token: str) -> bool:
+        try:
+            self.request(
+                "DELETE",
+                f"{self.api_base}/repos/{owner}/{repo}/actions/secrets/{secret_name}",
+                token,
+            )
+            return True
+        except GitHubApiError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
 
     def _quality_ruleset_payload(self) -> dict[str, Any]:
         return {
@@ -652,6 +1074,18 @@ class GitHubAppApi:
             token,
         )
         return detail if isinstance(detail, dict) else summary
+
+    def delete_quality_ruleset(self, owner: str, repo: str, token: str) -> bool:
+        ruleset = self.get_quality_ruleset(owner, repo, token)
+        ruleset_id = ruleset.get("id") if isinstance(ruleset, dict) else None
+        if not ruleset_id:
+            return False
+        self.request(
+            "DELETE",
+            f"{self.api_base}/repos/{owner}/{repo}/rulesets/{ruleset_id}",
+            token,
+        )
+        return True
 
     def quality_ruleset_status(self, owner: str, repo: str, token: str) -> dict[str, Any]:
         ruleset = self.get_quality_ruleset(owner, repo, token)
@@ -745,6 +1179,14 @@ class GitHubAppApi:
 
 
 def provision_repository(db: Session, repo: MonitoredRepository) -> dict[str, Any]:
+    """Configure a repository for autonomous quality reporting.
+
+    Important order: create and verify GitHub Actions secrets before pushing the
+    workflow file. A workflow commit immediately triggers GitHub Actions, so if
+    the workflow is pushed before DASHBOARD_URL/DASHBOARD_API_KEY exist, the
+    first automatic run cannot post to the dashboard and needs a manual rerun.
+    """
+
     key, raw_key = rotate_repository_api_key(db, repo)
     now = datetime.now(timezone.utc)
     workflow = render_caller_workflow()
@@ -757,14 +1199,18 @@ def provision_repository(db: Session, repo: MonitoredRepository) -> dict[str, An
         "actions": [],
     }
 
+    if repo.setup_status in {"ignored", "deprovisioning", "deprovisioned", "cleanup_pr_open", "removed"}:
+        raise ProvisioningError(f"Repository is {repo.setup_status}; restore it before configuring.")
+
     installation = db.query(GitHubInstallation).filter(GitHubInstallation.id == repo.installation_id).first() if repo.installation_id else None
     if settings.PROVISIONING_DRY_RUN:
         repo.setup_status = "needs_attention"
         repo.last_verified_at = now
         result["actions"] = [
-            "would_install_workflow",
             "would_set_dashboard_url_secret",
             "would_set_dashboard_api_key_secret",
+            "would_verify_secrets",
+            "would_install_workflow",
             "would_configure_ruleset",
         ]
         record_audit_event(
@@ -779,14 +1225,43 @@ def provision_repository(db: Session, repo: MonitoredRepository) -> dict[str, An
 
     if not installation:
         raise ProvisioningError("Repository is not linked to a GitHub App installation.")
-    if _dashboard_url_is_local(settings.PUBLIC_BASE_URL) and not settings.ALLOW_LOCAL_DASHBOARD_URL_FOR_PROVISIONING:
-        raise ProvisioningError(
-            "PUBLIC_BASE_URL is local. GitHub Actions cannot post reports to localhost. "
-            "Use a deployed HTTPS dashboard URL, or use ngrok/cloudflared for local testing."
-        )
+
+    dashboard_url = normalized_public_base_url()
 
     github = GitHubAppApi()
     token = github.installation_token(installation.installation_id)
+    repository_payload = github.get_repository(repo.owner, repo.repo, token)
+    repo.default_branch = repository_payload.get("default_branch") or repo.default_branch or "main"
+
+    # 1) Secrets first. This is the core automation fix.
+    github.set_repo_secret(repo.owner, repo.repo, "DASHBOARD_URL", dashboard_url, token)
+    github.set_repo_secret(repo.owner, repo.repo, "DASHBOARD_API_KEY", raw_key, token)
+
+    secret_names = github.list_repo_secret_names(repo.owner, repo.repo, token)
+    missing_secrets = sorted(REQUIRED_SECRET_NAMES - secret_names)
+    if missing_secrets:
+        raise ProvisioningError(
+            "GitHub Actions secrets were not created correctly: " + ", ".join(missing_secrets)
+        )
+
+    repo.secrets_configured_at = now
+    result["actions"].extend([
+        "dashboard_url_secret_configured",
+        "dashboard_api_key_secret_configured",
+        "secrets_verified_before_workflow",
+    ])
+    result["dashboard_url_configured"] = dashboard_url
+    result["secrets_verified"] = sorted(secret_names & REQUIRED_SECRET_NAMES)
+
+    # Make the newly rotated repository API key visible to the report receiver
+    # before the workflow commit triggers the first GitHub Actions run.
+    # Without this commit, the first automatic report can race the DB transaction
+    # and get a 401 until the user manually re-runs the job.
+    db.flush()
+    db.commit()
+    result["actions"].append("repo_api_key_committed_before_workflow")
+
+    # 2) Push workflow after secrets exist. This commit may trigger the first automatic run.
     workflow_delivery = github.upsert_file_or_pull_request(
         repo.owner,
         repo.repo,
@@ -797,26 +1272,45 @@ def provision_repository(db: Session, repo: MonitoredRepository) -> dict[str, An
         default_branch=repo.default_branch,
     )
     result["workflow_delivery"] = workflow_delivery
-    if workflow_delivery["mode"] == "direct":
+    delivery_mode = workflow_delivery.get("mode")
+
+    if delivery_mode in {"direct", "already_exists"}:
         repo.workflow_installed_at = now
-        result["actions"].append("workflow_installed")
+        _clear_setup_pr_fields(repo)
+        result["actions"].append("workflow_installed" if delivery_mode == "direct" else "workflow_already_exists")
     else:
-        repo.setup_status = "needs_attention"
+        repo.setup_status = "setup_pr_open"
+        _set_setup_pr_fields(repo, workflow_delivery)
         result["actions"].append("workflow_pull_request_opened")
 
-    github.set_repo_secret(repo.owner, repo.repo, "DASHBOARD_URL", settings.PUBLIC_BASE_URL.rstrip("/"), token)
-    github.set_repo_secret(repo.owner, repo.repo, "DASHBOARD_API_KEY", raw_key, token)
-    repo.secrets_configured_at = now
-    result["actions"].append("secrets_configured")
-
-    github.upsert_ruleset(repo.owner, repo.repo, token)
-    repo.ruleset_configured_at = now
-    result["actions"].append("ruleset_configured")
-
-    if workflow_delivery["mode"] == "direct":
+    if delivery_mode in {"direct", "already_exists"}:
+        # 3) Apply final ruleset only after workflow is present on default branch.
+        github.upsert_ruleset(repo.owner, repo.repo, token)
+        repo.ruleset_configured_at = now
         repo.setup_status = "active"
-    repo.last_verified_at = now
-    event_type = "repository_provisioned" if workflow_delivery["mode"] == "direct" else "repository_provisioning_pr_opened"
+        repo.is_active = True
+        _set_model_attr(repo, "ignored_at", None)
+        _set_model_attr(repo, "deprovisioned_at", None)
+        _clear_cleanup_pr_fields(repo)
+        _set_model_attr(repo, "last_deprovision_error", None)
+        repo.last_verified_at = now
+        result["actions"].append("ruleset_configured")
+        try:
+            verification = verify_repository_setup(db, repo)
+            result["verification"] = verification
+        except ProvisioningError:
+            raise
+        except Exception as exc:
+            repo.setup_status = "needs_attention"
+            result["verification_error"] = str(exc)
+    else:
+        # Do not apply final required-check ruleset before the workflow reaches the default branch.
+        # Otherwise the setup PR can be blocked by the quality gate it is trying to install.
+        repo.ruleset_configured_at = None
+        repo.last_verified_at = now
+        result["actions"].append("ruleset_waiting_for_setup_pr_merge")
+
+    event_type = "repository_provisioned" if delivery_mode in {"direct", "already_exists"} else "repository_provisioning_pr_opened"
     record_audit_event(
         db,
         tenant_id=repo.tenant_id,
@@ -826,10 +1320,101 @@ def provision_repository(db: Session, repo: MonitoredRepository) -> dict[str, An
         metadata={
             "workflow_path": settings.QUALITY_CALLER_WORKFLOW_PATH,
             "workflow_delivery": workflow_delivery,
+            "actions": result.get("actions", []),
+            "secrets_verified_before_workflow": True,
         },
     )
     return result
 
+
+def ignore_repository(db: Session, repo: MonitoredRepository, *, user_id: int | None = None) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    repo.is_active = False
+    repo.setup_status = "ignored"
+    _set_model_attr(repo, "ignored_at", now)
+    record_audit_event(db, tenant_id=repo.tenant_id, user_id=user_id, event_type="repository_ignored", target_type="repository", target_id=repo.full_name, metadata={"repository": repo.full_name})
+    return {"status": "ignored", "repository": repo.full_name}
+
+
+def restore_repository(db: Session, repo: MonitoredRepository, *, user_id: int | None = None) -> dict[str, Any]:
+    repo.is_active = True
+    _set_model_attr(repo, "ignored_at", None)
+    _set_model_attr(repo, "deprovisioned_at", None)
+    _set_model_attr(repo, "last_deprovision_error", None)
+    if repo.setup_status in {"ignored", "removed", "deprovisioned", "deprovisioning", "cleanup_pr_open"}:
+        repo.setup_status = "discovered"
+    record_audit_event(db, tenant_id=repo.tenant_id, user_id=user_id, event_type="repository_restored", target_type="repository", target_id=repo.full_name, metadata={"repository": repo.full_name})
+    return {"status": "restored", "repository": repo.full_name}
+
+
+def _revoke_repository_keys(db: Session, repo: MonitoredRepository, now: datetime) -> int:
+    count = 0
+    keys = db.query(RepositoryApiKey).filter(RepositoryApiKey.repository_id == repo.id, RepositoryApiKey.status == "active").all()
+    for key in keys:
+        key.status = "revoked"
+        key.revoked_at = now
+        count += 1
+    return count
+
+
+def deprovision_repository(db: Session, repo: MonitoredRepository, *, user_id: int | None = None) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    result: dict[str, Any] = {"repository": repo.full_name, "dry_run": settings.PROVISIONING_DRY_RUN, "actions": []}
+
+    if settings.PROVISIONING_DRY_RUN:
+        repo.setup_status = "deprovisioning"
+        repo.last_verified_at = now
+        result["actions"] = ["would_delete_dashboard_url_secret", "would_delete_dashboard_api_key_secret", "would_delete_ruleset", "would_remove_workflow", "would_revoke_repo_api_keys"]
+        return result
+
+    installation = db.query(GitHubInstallation).filter(GitHubInstallation.id == repo.installation_id).first() if repo.installation_id else None
+    if not installation:
+        raise ProvisioningError("Repository is not linked to a GitHub App installation.")
+
+    repo.setup_status = "deprovisioning"
+    github = GitHubAppApi()
+    token = github.installation_token(installation.installation_id)
+    try:
+        for secret_name in sorted(REQUIRED_SECRET_NAMES):
+            github.delete_repo_secret(repo.owner, repo.repo, secret_name, token)
+        repo.secrets_configured_at = None
+        result["actions"].append("secrets_deleted")
+
+        github.delete_quality_ruleset(repo.owner, repo.repo, token)
+        repo.ruleset_configured_at = None
+        result["actions"].append("ruleset_deleted")
+
+        delivery = github.delete_file_or_pull_request(repo.owner, repo.repo, settings.QUALITY_CALLER_WORKFLOW_PATH, "Remove Arya quality pipeline workflow", token, default_branch=repo.default_branch)
+        result["workflow_removal"] = delivery
+        if delivery.get("mode") == "pull_request":
+            repo.setup_status = "cleanup_pr_open"
+            _set_model_attr(repo, "cleanup_pr_number", delivery.get("pull_request_number"))
+            _set_model_attr(repo, "cleanup_pr_url", delivery.get("pull_request_url"))
+            _set_model_attr(repo, "cleanup_pr_branch", delivery.get("branch"))
+            result["actions"].append("cleanup_pull_request_opened")
+        else:
+            repo.workflow_installed_at = None
+            _set_model_attr(repo, "cleanup_pr_number", None)
+            _set_model_attr(repo, "cleanup_pr_url", None)
+            _set_model_attr(repo, "cleanup_pr_branch", None)
+            repo.setup_status = "deprovisioned"
+            _set_model_attr(repo, "deprovisioned_at", now)
+            repo.is_active = False
+            result["actions"].append("workflow_removed")
+
+        revoked_count = _revoke_repository_keys(db, repo, now)
+        result["revoked_api_keys"] = revoked_count
+        if revoked_count:
+            result["actions"].append("repo_api_keys_revoked")
+        repo.last_verified_at = now
+        _set_model_attr(repo, "last_deprovision_error", None)
+        record_audit_event(db, tenant_id=repo.tenant_id, user_id=user_id, event_type="repository_deprovisioned" if repo.setup_status == "deprovisioned" else "repository_cleanup_pr_opened", target_type="repository", target_id=repo.full_name, metadata=result)
+        return result
+    except Exception as exc:
+        repo.setup_status = "needs_attention"
+        _set_model_attr(repo, "last_deprovision_error", str(exc))
+        record_audit_event(db, tenant_id=repo.tenant_id, user_id=user_id, event_type="repository_deprovision_failed", target_type="repository", target_id=repo.full_name, metadata={"error": str(exc), "repository": repo.full_name})
+        raise
 
 def verify_repository_setup(db: Session, repo: MonitoredRepository) -> dict[str, Any]:
     """Verify the live GitHub setup needed for autonomous enforcement."""

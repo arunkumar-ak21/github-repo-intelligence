@@ -171,6 +171,16 @@ class MonitoredRepository(Base):
     secrets_configured_at = Column(DateTime, nullable=True)
     ruleset_configured_at = Column(DateTime, nullable=True)
     last_verified_at = Column(DateTime, nullable=True)
+    ignored_at = Column(DateTime, nullable=True)
+    deprovisioned_at = Column(DateTime, nullable=True)
+    setup_pr_number = Column(Integer, nullable=True)
+    setup_pr_url = Column(Text, nullable=True)
+    setup_pr_branch = Column(String, nullable=True)
+    cleanup_pr_number = Column(Integer, nullable=True)
+    cleanup_pr_url = Column(Text, nullable=True)
+    cleanup_pr_branch = Column(String, nullable=True)
+    last_sync_at = Column(DateTime, nullable=True)
+    last_deprovision_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
 

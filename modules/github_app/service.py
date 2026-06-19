@@ -7,6 +7,7 @@ import hmac
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -145,23 +146,68 @@ def upsert_installation_from_payload(
     return record
 
 
+def _repository_full_name_from_payload(item: dict[str, Any]) -> str:
+    return normalize_repo_name(
+        item.get("full_name")
+        or f"{item.get('owner', {}).get('login')}/{item.get('name')}"
+    )
+
+
+def _find_monitored_repository_for_upsert(
+    db: Session,
+    installation: GitHubInstallation,
+    full_name: str,
+) -> MonitoredRepository | None:
+    """Find an existing monitored repo without breaking tenant isolation.
+
+    Preferred identity is tenant_id + full_name.  For older local SQLite
+    databases, rows may have been created before tenants/installations existed,
+    or may already be linked to this same GitHub App installation.  Those legacy
+    rows are safe to adopt instead of inserting a duplicate.
+    """
+    record = (
+        db.query(MonitoredRepository)
+        .filter(
+            MonitoredRepository.tenant_id == installation.tenant_id,
+            MonitoredRepository.full_name == full_name,
+        )
+        .first()
+    )
+    if record:
+        return record
+
+    record = (
+        db.query(MonitoredRepository)
+        .filter(
+            MonitoredRepository.full_name == full_name,
+            or_(
+                MonitoredRepository.tenant_id.is_(None),
+                MonitoredRepository.installation_id == installation.id,
+            ),
+        )
+        .first()
+    )
+    return record
+
+
 def upsert_repositories_from_payload(
     db: Session,
     installation: GitHubInstallation,
     repositories: list[dict[str, Any]],
 ) -> list[MonitoredRepository]:
     records: list[MonitoredRepository] = []
+    seen_full_names: set[str] = set()
+    now = datetime.now(timezone.utc)
+
     for item in repositories:
-        full_name = normalize_repo_name(item.get("full_name") or f"{item.get('owner', {}).get('login')}/{item.get('name')}")
+        full_name = _repository_full_name_from_payload(item)
+        if full_name in seen_full_names:
+            continue
+        seen_full_names.add(full_name)
+
         owner, repo_name = split_repo(full_name)
-        record = (
-            db.query(MonitoredRepository)
-            .filter(
-                MonitoredRepository.tenant_id == installation.tenant_id,
-                MonitoredRepository.full_name == full_name,
-            )
-            .first()
-        )
+        record = _find_monitored_repository_for_upsert(db, installation, full_name)
+
         if not record:
             record = MonitoredRepository(
                 tenant_id=installation.tenant_id,
@@ -169,16 +215,32 @@ def upsert_repositories_from_payload(
                 full_name=full_name,
                 owner=owner,
                 repo=repo_name,
-                setup_status="pending",
+                setup_status="discovered",
                 is_active=True,
-                created_at=datetime.now(timezone.utc),
+                created_at=now,
             )
             db.add(record)
             db.flush()
+
+        previous_status = record.setup_status
+        record.tenant_id = installation.tenant_id
         record.installation_id = installation.id
+        record.full_name = full_name
+        record.owner = owner
+        record.repo = repo_name
         record.default_branch = item.get("default_branch") or record.default_branch
-        record.is_active = True
+        record.last_sync_at = now
+
+        # Sync means GitHub App can see the repository. It must not override
+        # an explicit product decision to ignore/deprovision that repository.
+        if previous_status in {"ignored", "deprovisioned", "deprovisioning", "cleanup_pr_open"}:
+            record.is_active = False
+        else:
+            record.is_active = True
+            if not record.setup_status or record.setup_status in {"removed", "needs_attention", "pending"}:
+                record.setup_status = "discovered"
         records.append(record)
+
     return records
 
 
@@ -214,7 +276,7 @@ def handle_installation_repositories_webhook(db: Session, payload: dict[str, Any
     removed = payload.get("repositories_removed") or []
     upsert_repositories_from_payload(db, installation, added)
     for item in removed:
-        full_name = normalize_repo_name(item.get("full_name") or f"{item.get('owner', {}).get('login')}/{item.get('name')}")
+        full_name = _repository_full_name_from_payload(item)
         record = (
             db.query(MonitoredRepository)
             .filter(
@@ -225,7 +287,7 @@ def handle_installation_repositories_webhook(db: Session, payload: dict[str, Any
         )
         if record:
             record.is_active = False
-            record.setup_status = "needs_attention"
+            record.setup_status = "removed"
     return installation
 
 
