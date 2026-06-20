@@ -80,6 +80,7 @@ type TabKey = "overview" | "cicd" | "deps" | "pipeline" | "setup" | "history";
 type ViewKey = "landing" | "dashboard";
 type Toast = { id: number; type: "success" | "error" | "warning" | "info"; message: string };
 type ProgressLine = { id: number; module: string; message: string; level?: string };
+type BatchFailure = { repo: string; status?: string; error?: string };
 
 type ModuleConfig = {
   key: TabKey;
@@ -200,6 +201,23 @@ function normalizeAnalysisPayload(payload: AnalysisPayload | null): AnalysisPayl
     "";
   const history_id = payload.history_id ?? payload.id ?? null;
   return { ...payload, repo, metadata, cicd, dependencies, history_id };
+}
+
+function compactHealthScore(item: AnalysisPayload | AnalysisHistoryItem | null | undefined) {
+  if (!item) return null;
+  const source = item as any;
+  const deps = source.dependencies || source.dependencies_json || {};
+  const score = Number(deps?.health?.score ?? source.health_score);
+  return Number.isFinite(score) ? Math.round(score) : null;
+}
+
+function dependencyCount(item: AnalysisPayload | AnalysisHistoryItem | null | undefined) {
+  if (!item) return 0;
+  const source = item as any;
+  const depsPayload = source.dependencies || source.dependencies_json || {};
+  const deps = Array.isArray((depsPayload as any)?.dependencies) ? (depsPayload as any).dependencies : [];
+  const total = Number(source.total_dependencies ?? deps.length);
+  return Number.isFinite(total) ? total : 0;
 }
 
 function formatNumber(value: unknown) {
@@ -2573,7 +2591,7 @@ function LandingPage({
   ];
 
   return (
-    <div className="min-h-screen bg-white text-zinc-950">
+    <div className="min-h-screen overflow-x-hidden bg-white text-zinc-950">
       {/* ─── Navbar ─────────────────────────────────────────────── */}
       {/* ─── Navbar ─────────────────────────────────────────────── */}
       <GlassFilter />
@@ -2699,7 +2717,7 @@ function LandingPage({
             </div>
           </div>
           {/* Hero Dashboard Mockup */}
-          <div className="mx-auto mt-16 max-w-7xl px-6 lg:mt-20 translate-x-2">
+          <div className="mx-auto mt-16 max-w-7xl px-6 lg:mt-20">
             <HeroDashboardMockup />
           </div>
         </section>
@@ -2952,6 +2970,119 @@ function LandingPage({
   );
 }
 
+function BatchResultsPanel({
+  batchId,
+  results,
+  failures,
+  running,
+  onOpenResult,
+}: Readonly<{
+  batchId: string;
+  results: AnalysisPayload[];
+  failures: BatchFailure[];
+  running: boolean;
+  onOpenResult: (result: AnalysisPayload) => void;
+}>) {
+  const completed = results.length;
+  const failed = failures.length;
+  const scores = results
+    .map((item) => compactHealthScore(item))
+    .filter((score): score is number => typeof score === "number");
+  const averageScore = scores.length
+    ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length)
+    : null;
+  const rows: Array<
+    | { kind: "success"; repo: string; result: AnalysisPayload }
+    | { kind: "failed"; repo: string; failure: BatchFailure }
+  > = [
+    ...results.map((result) => ({ kind: "success" as const, repo: result.repo || "unknown/repo", result })),
+    ...failures.map((failure) => ({ kind: "failed" as const, repo: failure.repo || "unknown/repo", failure })),
+  ];
+
+  return (
+    <Card className="mb-5">
+      <CardHeader>
+        <SharedSectionHeader
+          eyebrow="Batch result"
+          title={running ? "Batch analysis is running" : "Batch analysis complete"}
+          description="All repositories are analyzed in the backend first. Select a completed repository below to open its saved intelligence snapshot."
+          action={batchId ? <SharedStatusPill tone="info" label={batchId} /> : undefined}
+        />
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-4">
+          <SharedMetricCard label="Completed" value={completed} hint="Repositories with saved analysis records" tone={completed ? "success" : "neutral"} icon={ShieldCheck} />
+          <SharedMetricCard label="Failed" value={failed} hint="Invalid or failed repositories" tone={failed ? "error" : "success"} icon={AlertTriangle} />
+          <SharedMetricCard label="Average score" value={averageScore ?? "N/A"} hint="Across completed repositories" tone={scoreTone(averageScore)} icon={BarChart3} />
+          <SharedMetricCard label="Batch size" value={completed + failed} hint="Unique requested repositories" tone="neutral" icon={History} />
+        </div>
+
+        <SharedDataTable
+          rows={rows}
+          getRowKey={(row, index) => `${row.kind}-${row.repo}-${index}`}
+          empty={running ? "Waiting for repository results..." : "No batch results were returned."}
+          columns={[
+            {
+              key: "repo",
+              header: "Repository",
+              render: (row) => (
+                <div>
+                  <p className="font-mono font-semibold text-zinc-950">{row.repo}</p>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    {row.kind === "success"
+                      ? `History #${row.result.history_id ?? row.result.id ?? "-"}`
+                      : row.failure.error || "Failed"}
+                  </p>
+                </div>
+              ),
+            },
+            {
+              key: "status",
+              header: "Status",
+              render: (row) => row.kind === "success"
+                ? <SharedStatusPill tone="success" label="Completed" />
+                : <SharedStatusPill tone="error" label="Failed" />,
+            },
+            {
+              key: "score",
+              header: "Health",
+              render: (row) => {
+                if (row.kind === "failed") return "-";
+                const score = compactHealthScore(row.result);
+                return <SharedStatusPill tone={scoreTone(score)} label={score ?? "N/A"} />;
+              },
+            },
+            {
+              key: "deps",
+              header: "Dependencies",
+              render: (row) => row.kind === "success" ? formatNumber(dependencyCount(row.result)) : "-",
+            },
+            {
+              key: "analyzed",
+              header: "Analyzed",
+              render: (row) => row.kind === "success" ? formatDate(row.result.analyzed_at) : "-",
+            },
+            {
+              key: "action",
+              header: "Action",
+              render: (row) => row.kind === "success" ? (
+                <Button size="sm" variant="outline" onClick={() => onOpenResult(row.result)}>
+                  <ExternalLink className="mr-2 size-4" />
+                  Open result
+                </Button>
+              ) : (
+                <Button size="sm" variant="ghost" disabled>
+                  Not available
+                </Button>
+              ),
+            },
+          ]}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -2968,6 +3099,9 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeButtonStatus, setAnalyzeButtonStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [batchRunning, setBatchRunning] = useState(false);
+  const [activeBatchId, setActiveBatchId] = useState("");
+  const [batchResults, setBatchResults] = useState<AnalysisPayload[]>([]);
+  const [batchFailures, setBatchFailures] = useState<BatchFailure[]>([]);
   const [mode, setMode] = useState<"single" | "batch">("single");
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -3067,6 +3201,9 @@ export default function App() {
     setAnalyzing(true);
     setAnalyzeButtonStatus("loading");
     setProgress([]);
+    setActiveBatchId("");
+    setBatchResults([]);
+    setBatchFailures([]);
     openModule("overview", true);
     let finalData: AnalysisPayload | null = null;
     try {
@@ -3111,25 +3248,75 @@ export default function App() {
     setBatchRunning(true);
     setProgress([]);
     const batchId = `batch_${Date.now()}`;
+    setActiveBatchId(batchId);
+    setBatchResults([]);
+    setBatchFailures([]);
+    const completedResults: AnalysisPayload[] = [];
+    const failedResults: BatchFailure[] = [];
     try {
       await streamPost("/api/batch/analyze", { repos, batch_id: batchId }, ({ event: eventName, data }: StreamEvent<any>) => {
+        if (eventName === "batch_started") {
+          setActiveBatchId(data.batch_id || batchId);
+        }
         if (eventName === "batch_progress") {
           setProgress((items) => [...items, { id: Date.now() + Math.random(), module: "batch", message: `Analyzing ${data.repo} (${data.current}/${data.total})` }]);
+        }
+        if (eventName === "repo_failed") {
+          const failed = { repo: data.repo || "unknown/repo", status: "failed", error: data.error || "Analysis failed." };
+          failedResults.push(failed);
+          setBatchFailures([...failedResults]);
         }
         if (eventName === "progress") {
           setProgress((items) => [...items.slice(-80), { id: Date.now() + Math.random(), module: data.module || "system", message: data.data || data.event || "progress", level: data.level }]);
         }
         if (eventName === "done") {
-          setAnalysis(normalizeAnalysisPayload(data));
+          const normalized = normalizeAnalysisPayload(data);
+          if (normalized?.repo) {
+            completedResults.push(normalized);
+            setBatchResults([...completedResults]);
+          }
+        }
+        if (eventName === "batch_done") {
+          if (data?.batch_id) {
+            setActiveBatchId(data.batch_id);
+          }
+          const items: Array<Record<string, any>> = (
+            Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : []
+          ) as Array<Record<string, any>>;
+          const completed = items
+            .filter((item) => item && item.status !== "failed")
+            .map((item) => normalizeAnalysisPayload(item))
+            .filter((item): item is AnalysisPayload => Boolean(item?.repo));
+          const failed = items
+            .filter((item) => item?.status === "failed")
+            .map((item) => ({ repo: item.repo || "unknown/repo", status: "failed", error: item.error || "Analysis failed." }));
+          if (completed.length || failed.length) {
+            completedResults.splice(0, completedResults.length, ...completed);
+            failedResults.splice(0, failedResults.length, ...failed);
+            setBatchResults([...completedResults]);
+            setBatchFailures([...failedResults]);
+          }
         }
       });
       showToast("success", "Batch analysis complete.");
+      openModule("overview", true);
       await loadHistory();
     } catch (error) {
       showToast("error", error instanceof Error ? error.message : "Batch analysis failed.");
     } finally {
       setBatchRunning(false);
     }
+  }
+
+  function openBatchResult(result: AnalysisPayload) {
+    const normalized = normalizeAnalysisPayload(result);
+    if (!normalized) return;
+    setAnalysis(normalized);
+    setRepoInput(normalized.repo || "");
+    setMode("single");
+    openModule("overview", true);
+    if (!normalized.metadata_details) void enrichMetadataDetails(normalized);
+    showToast("success", "Batch repository result loaded.");
   }
 
   async function openHistory(item: AnalysisHistoryItem) {
@@ -3420,6 +3607,16 @@ export default function App() {
               <p className="mt-3 text-sm text-zinc-600">Supports <strong>owner/repo</strong>, GitHub URLs, and <strong>.git</strong> URLs.</p>
             )}
           </section>
+
+          {mode === "batch" && (activeBatchId || batchResults.length || batchFailures.length) ? (
+            <BatchResultsPanel
+              batchId={activeBatchId}
+              results={batchResults}
+              failures={batchFailures}
+              running={batchRunning}
+              onOpenResult={openBatchResult}
+            />
+          ) : null}
 
           {progress.length ? (
             <Card className="mb-5">

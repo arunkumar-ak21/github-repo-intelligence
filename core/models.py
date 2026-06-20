@@ -87,6 +87,26 @@ class AnalysisHistory(Base):
     analysis_duration_ms = Column(Integer, nullable=True)
 
 
+class AnalysisBatch(Base):
+    __tablename__ = "analysis_batches"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "batch_id", name="uq_analysis_batch_tenant_batch_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), index=True, nullable=True)
+    batch_id = Column(String, index=True, nullable=False)
+    status = Column(String, index=True, nullable=False, default="running")
+    requested_count = Column(Integer, nullable=False, default=0)
+    completed_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+    requested_repos = Column(JSON, nullable=True)
+    result_summary = Column(JSON, nullable=True)
+    raw_json = Column(JSON, nullable=True)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+
 class PipelineRun(Base):
     __tablename__ = "pipeline_runs"
     __table_args__ = (

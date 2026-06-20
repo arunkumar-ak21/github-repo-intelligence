@@ -162,6 +162,7 @@ function safeSummary(record: AnalysisHistoryItem | null) {
   if (!record) return [];
   return [
     ["Repository", record.repo],
+    ["Batch", record.batch_id || "Single analysis"],
     ["Analyzed", formatDate(record.analyzed_at)],
     ["Language", record.language || "Unknown"],
     ["Health score", record.health_score ?? "N/A"],
@@ -187,6 +188,7 @@ export function AnalysisHistoryPage({
   onToast,
 }: AnalysisHistoryPageProps) {
   const [repoFilter, setRepoFilter] = useState("");
+  const [batchFilter, setBatchFilter] = useState("");
   const [moduleFilter, setModuleFilter] = useState<ModuleFilter>("all");
   const [dateFilter, setDateFilter] = useState("");
   const [selectedRecord, setSelectedRecord] = useState<AnalysisHistoryItem | null>(null);
@@ -195,12 +197,14 @@ export function AnalysisHistoryPage({
   const [loadingRecord, setLoadingRecord] = useState(false);
 
   const repos = useMemo(() => Array.from(new Set(history.map((item) => item.repo))).sort(), [history]);
+  const batches = useMemo(() => Array.from(new Set(history.map((item) => item.batch_id).filter(Boolean) as string[])).sort().reverse(), [history]);
   const filteredHistory = useMemo(() => {
     return history.filter((item) => {
       const repoMatch = repoFilter ? item.repo === repoFilter : true;
-      return repoMatch && hasModule(item, moduleFilter) && dateMatches(item, dateFilter);
+      const batchMatch = batchFilter ? item.batch_id === batchFilter : true;
+      return repoMatch && batchMatch && hasModule(item, moduleFilter) && dateMatches(item, dateFilter);
     });
-  }, [dateFilter, history, moduleFilter, repoFilter]);
+  }, [batchFilter, dateFilter, history, moduleFilter, repoFilter]);
 
   const latest = history[0] || null;
   const selectedForCompare = useMemo(() => {
@@ -252,9 +256,10 @@ export function AnalysisHistoryPage({
         </CardHeader>
       </Card>
 
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-5">
         <MetricCard label="Saved analyses" value={history.length} hint="Tenant-scoped AnalysisHistory rows" tone="neutral" icon={Archive} />
         <MetricCard label="Repositories" value={repos.length} hint="Unique repositories analyzed" tone="neutral" icon={History} />
+        <MetricCard label="Batches" value={batches.length} hint="Grouped batch analysis runs" tone="info" icon={CalendarDays} />
         <MetricCard label="Latest score" value={latest?.health_score ?? "N/A"} hint={latest?.repo || "No latest result"} tone={scoreTone(latest?.health_score)} icon={Activity} />
         <MetricCard label="Dependency risk" value={compactNumber(latest?.vulnerable_count)} hint="Vulnerable dependencies in latest analysis" tone={latest?.vulnerable_count ? "warning" : "success"} icon={ShieldAlert} />
       </div>
@@ -268,10 +273,14 @@ export function AnalysisHistoryPage({
           />
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_auto]">
+          <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]">
             <select className="repo-select" value={repoFilter} onChange={(event) => setRepoFilter(event.target.value)}>
               <option value="">All repositories</option>
               {repos.map((repo) => <option key={repo} value={repo}>{repo}</option>)}
+            </select>
+            <select className="repo-select" value={batchFilter} onChange={(event) => setBatchFilter(event.target.value)}>
+              <option value="">All batches</option>
+              {batches.map((batch) => <option key={batch} value={batch}>{batch}</option>)}
             </select>
             <select className="repo-select" value={moduleFilter} onChange={(event) => setModuleFilter(event.target.value as ModuleFilter)}>
               <option value="all">All modules</option>
@@ -280,7 +289,7 @@ export function AnalysisHistoryPage({
               <option value="dependencies">Dependencies</option>
             </select>
             <input className="repo-input" type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} />
-            <Button variant="outline" onClick={() => { setRepoFilter(""); setModuleFilter("all"); setDateFilter(""); }}>
+            <Button variant="outline" onClick={() => { setRepoFilter(""); setBatchFilter(""); setModuleFilter("all"); setDateFilter(""); }}>
               <Search className="mr-2 size-4" />
               Reset
             </Button>
@@ -373,6 +382,13 @@ export function AnalysisHistoryPage({
                   key: "modules",
                   header: "Modules",
                   render: moduleBadges,
+                },
+                {
+                  key: "batch",
+                  header: "Batch",
+                  render: (item) => item.batch_id
+                    ? <StatusPill tone="info" label={item.batch_id} />
+                    : <StatusPill tone="neutral" label="Single" />,
                 },
                 {
                   key: "health",

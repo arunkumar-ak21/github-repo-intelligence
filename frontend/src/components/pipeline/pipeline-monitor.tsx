@@ -1,11 +1,11 @@
 import {
   DataTable,
+  DetailDrawer,
   EmptyState,
   FindingCard,
   MetricCard,
   SectionHeader,
   StatusPill,
-  severityToTone,
 } from "@/components/common/module-ui";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,7 +31,11 @@ import {
   Bot,
   CheckCircle2,
   Clock3,
+  Download,
+  Eye,
   ExternalLink,
+  FileJson,
+  FileText,
   GitBranch,
   GitCommit,
   Github,
@@ -180,6 +184,173 @@ function isHttpUrl(value: string) {
   return /^https?:\/\//i.test(value);
 }
 
+function stageLabel(stageName?: string | null) {
+  return STAGE_LABELS[String(stageName || "")] || statusText(stageName || "unknown");
+}
+
+function safeReportValue(value: unknown) {
+  if (value === null || value === undefined || value === "") return "-";
+  return String(value).replace(/\r?\n/g, " ").trim();
+}
+
+function markdownCell(value: unknown) {
+  return safeReportValue(value).replace(/\|/g, "\\|");
+}
+
+function markdownTable(headers: string[], rows: unknown[][]) {
+  const header = `| ${headers.map(markdownCell).join(" | ")} |`;
+  const divider = `| ${headers.map(() => "---").join(" | ")} |`;
+  const body = rows.map((row) => `| ${row.map(markdownCell).join(" | ")} |`);
+  return [header, divider, ...body].join("\n");
+}
+
+function reportFileBase(run: PipelineRun) {
+  const repo = (run.repo || "repository").replace(/[^a-zA-Z0-9._-]+/g, "-");
+  return `arya-pipeline-${repo}-${shortSha(run.commit_sha)}`;
+}
+
+function safeReportPayload(run: PipelineRun) {
+  const findings = collectFindings(run).map((finding) => ({
+    stage: finding.stage_name,
+    scanner: finding.scanner || null,
+    severity: finding.severity || null,
+    rule_id: finding.rule_id || null,
+    title: finding.title || null,
+    message: finding.message || null,
+    file_path: finding.file_path || null,
+    line_number: finding.line_number || null,
+    recommendation: finding.recommendation || null,
+  }));
+
+  return {
+    generated_at: new Date().toISOString(),
+    report_type: "pipeline_monitor_summary",
+    repo: run.repo,
+    branch: run.branch || null,
+    commit_sha: run.commit_sha || null,
+    pr_number: run.pr_number || null,
+    workflow_run_id: run.workflow_run_id || null,
+    workflow_url: run.workflow_url || null,
+    overall_status: run.overall_status || null,
+    started_at: run.started_at || null,
+    completed_at: run.completed_at || null,
+    quality_summary: qualitySummary(run),
+    stages: (run.stages || []).map((stage) => ({
+      stage_name: stage.stage_name,
+      status: stage.status || null,
+      blocking: Boolean(stage.blocking),
+      started_at: stage.started_at || null,
+      completed_at: stage.completed_at || null,
+      duration_ms: stage.duration_ms || null,
+      summary: stage.summary || {},
+      artifacts: stage.artifacts || {},
+      findings_count: stage.findings?.length || 0,
+    })),
+    findings,
+    artifacts: collectArtifacts(run),
+  };
+}
+
+function buildPipelineReportMarkdown(run: PipelineRun) {
+  const summary = qualitySummary(run);
+  const stages = run.stages || [];
+  const findings = collectFindings(run);
+  const artifacts = collectArtifacts(run);
+
+  const stageRows = stages.length
+    ? stages.map((stage) => [
+        stageLabel(stage.stage_name),
+        statusText(stage.status),
+        stage.blocking ? "Yes" : "No",
+        formatDuration(stage.duration_ms),
+        formatDate(stage.completed_at || stage.started_at),
+      ])
+    : [["No stages reported", "-", "-", "-", "-"]];
+
+  const findingRows = findings.length
+    ? findings.map((finding) => [
+        stageLabel(finding.stage_name),
+        finding.severity || "info",
+        finding.scanner || "-",
+        finding.rule_id || "-",
+        finding.file_path ? `${finding.file_path}${finding.line_number ? `:${finding.line_number}` : ""}` : "-",
+        finding.title || finding.message || "Pipeline finding",
+        finding.recommendation || "-",
+      ])
+    : [["-", "-", "-", "-", "-", "No findings stored for this run", "-"]];
+
+  const artifactRows = artifacts.length
+    ? artifacts.map((artifact) => [
+        stageLabel(artifact.stage),
+        artifact.label,
+        artifact.value,
+      ])
+    : [["-", "No artifacts stored", "-"]];
+
+  return [
+    "# Arya Pipeline Report",
+    "",
+    "## Verdict",
+    `- Repository: ${safeReportValue(run.repo)}`,
+    `- Branch: ${safeReportValue(run.branch)}`,
+    `- Commit: ${safeReportValue(run.commit_sha)}`,
+    `- Pull request: ${run.pr_number ? `#${run.pr_number}` : "-"}`,
+    `- Workflow run: ${safeReportValue(run.workflow_run_id)}`,
+    `- Workflow URL: ${safeReportValue(run.workflow_url)}`,
+    `- Overall status: ${statusText(run.overall_status)}`,
+    `- Started: ${formatDate(run.started_at)}`,
+    `- Completed: ${formatDate(run.completed_at)}`,
+    `- Generated: ${new Date().toISOString()}`,
+    "",
+    "## Quality Summary",
+    `- Total findings: ${numberFromSummary(summary, "total_findings")}`,
+    `- Critical: ${numberFromSummary(summary, "critical")}`,
+    `- High: ${numberFromSummary(summary, "high")}`,
+    `- Medium: ${numberFromSummary(summary, "medium")}`,
+    `- Low: ${numberFromSummary(summary, "low")}`,
+    `- Files scanned: ${numberFromSummary(summary, "files_scanned")}`,
+    `- Duration seconds: ${numberFromSummary(summary, "duration_seconds")}`,
+    "",
+    "## Stage Results",
+    markdownTable(["Stage", "Status", "Blocking", "Duration", "Updated"], stageRows),
+    "",
+    "## Findings",
+    "Secret values and raw scanner payloads are intentionally excluded from this report.",
+    "",
+    markdownTable(["Stage", "Severity", "Scanner", "Rule", "File", "Finding", "Recommendation"], findingRows),
+    "",
+    "## Artifacts",
+    "Use the GitHub Actions run for the full uploaded artifact ZIP. This dashboard report contains the safe normalized summary.",
+    "",
+    markdownTable(["Stage", "Artifact", "Value"], artifactRows),
+    "",
+  ].join("\n");
+}
+
+function downloadTextFile(filename: string, contents: string, mimeType: string) {
+  const blob = new Blob([contents], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadRunReport(run: PipelineRun, format: "markdown" | "json") {
+  if (format === "json") {
+    downloadTextFile(
+      `${reportFileBase(run)}.json`,
+      JSON.stringify(safeReportPayload(run), null, 2),
+      "application/json",
+    );
+    return;
+  }
+  downloadTextFile(`${reportFileBase(run)}.md`, buildPipelineReportMarkdown(run), "text/markdown");
+}
+
 function RunTimeline({ run }: Readonly<{ run: PipelineRun | null }>) {
   return (
     <Card>
@@ -207,7 +378,7 @@ function RunTimeline({ run }: Readonly<{ run: PipelineRun | null }>) {
                 </div>
                 <h3 className="mt-4 text-sm font-semibold text-zinc-950">{STAGE_LABELS[stageName]}</h3>
                 <p className="mt-1 text-xs leading-5 text-zinc-600">
-                  {stage ? `${formatDuration(stage.duration_ms)} · ${stage.blocking ? "Blocking" : "Non-blocking"}` : "Waiting for report"}
+                  {stage ? `${formatDuration(stage.duration_ms)} - ${stage.blocking ? "Blocking" : "Non-blocking"}` : "Waiting for report"}
                 </p>
               </div>
             );
@@ -310,17 +481,46 @@ function LatestRunSummary({
   );
 }
 
-function RunActions({ run, setupRepo }: Readonly<{ run: PipelineRun | null; setupRepo: SetupRepository | null }>) {
+function RunActions({
+  run,
+  setupRepo,
+  onOpenReport,
+  onDownloadReport,
+  reportLoading,
+}: Readonly<{
+  run: PipelineRun | null;
+  setupRepo: SetupRepository | null;
+  onOpenReport: (run: PipelineRun) => void;
+  onDownloadReport: (run: PipelineRun) => void;
+  reportLoading: boolean;
+}>) {
   return (
     <Card>
       <CardHeader>
         <SectionHeader
           eyebrow="Retry and setup"
           title="Operational links"
-          description="Use GitHub Actions for reruns. Use Repo Setup when workflow, secrets, or ruleset status needs attention."
+          description="Open a readable report here. Use GitHub Actions for reruns and full artifact ZIP downloads."
         />
       </CardHeader>
       <CardContent className="flex flex-wrap gap-2">
+        {run ? (
+          <>
+            <Button variant="default" onClick={() => onOpenReport(run)} disabled={reportLoading}>
+              {reportLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+              Open report
+            </Button>
+            <Button variant="outline" onClick={() => onDownloadReport(run)} disabled={reportLoading}>
+              <Download className="mr-2 size-4" />
+              Download report
+            </Button>
+          </>
+        ) : (
+          <Button variant="outline" disabled>
+            <FileText className="mr-2 size-4" />
+            No report yet
+          </Button>
+        )}
         {run?.workflow_url ? (
           <Button asChild variant="outline">
             <a href={run.workflow_url} target="_blank" rel="noreferrer">
@@ -353,6 +553,191 @@ function RunActions({ run, setupRepo }: Readonly<{ run: PipelineRun | null; setu
   );
 }
 
+function ReportDrawer({
+  run,
+  open,
+  onClose,
+  onDownloadMarkdown,
+  onDownloadJson,
+}: Readonly<{
+  run: PipelineRun | null;
+  open: boolean;
+  onClose: () => void;
+  onDownloadMarkdown: () => void;
+  onDownloadJson: () => void;
+}>) {
+  const summary = qualitySummary(run);
+  const findings = collectFindings(run);
+  const artifacts = collectArtifacts(run);
+
+  return (
+    <DetailDrawer
+      open={open}
+      title={run ? `${run.repo} pipeline report` : "Pipeline report"}
+      description="Readable enforcement summary generated from normalized dashboard data. Raw scanner payloads and secret values are not included."
+      onClose={onClose}
+    >
+      {run ? (
+        <div className="space-y-5">
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={onDownloadMarkdown}>
+              <Download className="mr-2 size-4" />
+              Download Markdown
+            </Button>
+            <Button variant="outline" onClick={onDownloadJson}>
+              <FileJson className="mr-2 size-4" />
+              Download safe JSON
+            </Button>
+            {run.workflow_url ? (
+              <Button asChild variant="outline">
+                <a href={run.workflow_url} target="_blank" rel="noreferrer">
+                  <ExternalLink className="mr-2 size-4" />
+                  Open GitHub run
+                </a>
+              </Button>
+            ) : null}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <MetricCard label="Status" value={statusText(run.overall_status)} tone={statusTone(run.overall_status)} icon={ShieldCheck} />
+            <MetricCard label="Findings" value={numberFromSummary(summary, "total_findings")} hint={`${numberFromSummary(summary, "critical") + numberFromSummary(summary, "high")} critical/high`} tone={numberFromSummary(summary, "total_findings") ? "warning" : "success"} icon={AlertCircle} />
+          </div>
+
+          <Card>
+            <CardHeader>
+              <SectionHeader
+                eyebrow="Run identity"
+                title="Repository and workflow"
+                description="This metadata connects the dashboard report back to the exact GitHub Actions run."
+              />
+            </CardHeader>
+            <CardContent>
+              <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                <div>
+                  <dt className="font-semibold text-zinc-950">Repository</dt>
+                  <dd className="mt-1 font-mono text-zinc-600">{run.repo}</dd>
+                </div>
+                <div>
+                  <dt className="font-semibold text-zinc-950">Branch</dt>
+                  <dd className="mt-1 font-mono text-zinc-600">{run.branch || "-"}</dd>
+                </div>
+                <div>
+                  <dt className="font-semibold text-zinc-950">Commit</dt>
+                  <dd className="mt-1 font-mono text-zinc-600">{run.commit_sha || "-"}</dd>
+                </div>
+                <div>
+                  <dt className="font-semibold text-zinc-950">Workflow run</dt>
+                  <dd className="mt-1 font-mono text-zinc-600">{run.workflow_run_id || "-"}</dd>
+                </div>
+              </dl>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <SectionHeader eyebrow="Stages" title="Stage results" />
+            </CardHeader>
+            <CardContent>
+              <DataTable<PipelineStage>
+                rows={run.stages || []}
+                getRowKey={(stage, index) => `${stage.stage_name}-${index}`}
+                empty="No stage results were stored for this report."
+                columns={[
+                  {
+                    key: "stage",
+                    header: "Stage",
+                    render: (stage) => stageLabel(stage.stage_name),
+                  },
+                  {
+                    key: "status",
+                    header: "Status",
+                    render: (stage) => <StatusPill tone={statusTone(stage.status)} label={statusText(stage.status)} />,
+                  },
+                  {
+                    key: "blocking",
+                    header: "Blocking",
+                    render: (stage) => (stage.blocking ? "Yes" : "No"),
+                  },
+                  {
+                    key: "duration",
+                    header: "Duration",
+                    render: (stage) => formatDuration(stage.duration_ms),
+                  },
+                ]}
+              />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <SectionHeader
+                eyebrow="Findings"
+                title="Top findings"
+                description={findings.length > 20 ? "Showing the first 20 findings here. Download the report for the full stored finding list." : "Safe, normalized findings only."}
+                action={<StatusPill tone={findings.length ? "warning" : "success"} label={`${findings.length} findings`} />}
+              />
+            </CardHeader>
+            <CardContent>
+              {findings.length ? (
+                <div className="space-y-3">
+                  {findings.slice(0, 20).map((finding, index) => (
+                    <FindingCard
+                      key={`${finding.stage_name}-${finding.rule_id}-${finding.file_path}-${index}`}
+                      title={finding.title || finding.rule_id || "Pipeline finding"}
+                      severity={finding.severity || "info"}
+                      message={finding.message || undefined}
+                      file={finding.file_path ? `${finding.file_path}${finding.line_number ? `:${finding.line_number}` : ""}` : undefined}
+                      ruleId={`${stageLabel(finding.stage_name)}${finding.scanner ? ` - ${finding.scanner}` : ""}`}
+                      recommendation={finding.recommendation || undefined}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <EmptyState icon={ShieldCheck} title="No findings in this report" message="The workflow may still have logs in GitHub Actions if a stage failed without normalized findings." />
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <SectionHeader
+                eyebrow="Artifacts"
+                title="Report artifacts"
+                description="Dashboard downloads are generated here. The full uploaded ZIP remains in GitHub Actions."
+                action={run.workflow_url ? (
+                  <Button asChild variant="outline" size="sm">
+                    <a href={run.workflow_url} target="_blank" rel="noreferrer">
+                      <Archive className="mr-2 size-4" />
+                      Open GitHub artifacts
+                    </a>
+                  </Button>
+                ) : undefined}
+              />
+            </CardHeader>
+            <CardContent>
+              {artifacts.length ? (
+                <div className="space-y-2">
+                  {artifacts.map((artifact, index) => (
+                    <div key={`${artifact.stage}-${artifact.label}-${index}`} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 px-3 py-2 text-sm">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-zinc-950">{artifact.label}</p>
+                        <p className="truncate font-mono text-xs text-zinc-500">{artifact.value}</p>
+                      </div>
+                      <StatusPill tone="neutral" label={stageLabel(artifact.stage)} />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState icon={Archive} title="No artifact names stored" message="Open the GitHub Actions run if artifact upload completed but the dashboard payload did not include artifact metadata." />
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+    </DetailDrawer>
+  );
+}
+
 function ArtifactLinks({ run }: Readonly<{ run: PipelineRun | null }>) {
   const artifacts = collectArtifacts(run);
   return (
@@ -362,7 +747,19 @@ function ArtifactLinks({ run }: Readonly<{ run: PipelineRun | null }>) {
           eyebrow="Evidence"
           title="Artifacts and report links"
           description="Links and artifact names generated by GitHub Actions. Raw backend payloads are intentionally not exposed here."
-          action={<StatusPill tone="neutral" label={`${artifacts.length} links`} />}
+          action={
+            <div className="flex flex-wrap gap-2">
+              <StatusPill tone="neutral" label={`${artifacts.length} links`} />
+              {run?.workflow_url ? (
+                <Button asChild variant="outline" size="sm">
+                  <a href={run.workflow_url} target="_blank" rel="noreferrer">
+                    <Archive className="mr-2 size-4" />
+                    GitHub artifacts
+                  </a>
+                </Button>
+              ) : null}
+            </div>
+          }
         />
       </CardHeader>
       <CardContent>
@@ -412,6 +809,8 @@ export function PipelineMonitorPanel() {
   const [loading, setLoading] = useState(true);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [reportRun, setReportRun] = useState<PipelineRun | null>(null);
+  const [reportLoadingId, setReportLoadingId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [repoFilter, setRepoFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
@@ -465,6 +864,39 @@ export function PipelineMonitorPanel() {
       cancelled = true;
     };
   }, [runs, selectedRunId]);
+
+  async function loadRunDetailsForReport(run: PipelineRun) {
+    if (selectedRun?.id === run.id && (selectedRun.stages?.length || selectedRun.quality_findings?.length)) {
+      return selectedRun;
+    }
+    const details = await apiGet<PipelineRun>(`/api/pipeline/runs/${run.id}`);
+    if (selectedRunId === run.id) setSelectedRun(details);
+    return details;
+  }
+
+  async function openRunReport(run: PipelineRun) {
+    setReportLoadingId(run.id);
+    try {
+      const details = await loadRunDetailsForReport(run);
+      setReportRun(details);
+    } catch {
+      setReportRun(run);
+    } finally {
+      setReportLoadingId(null);
+    }
+  }
+
+  async function downloadRunReportWithDetails(run: PipelineRun, format: "markdown" | "json" = "markdown") {
+    setReportLoadingId(run.id);
+    try {
+      const details = await loadRunDetailsForReport(run);
+      downloadRunReport(details, format);
+    } catch {
+      downloadRunReport(run, format);
+    } finally {
+      setReportLoadingId(null);
+    }
+  }
 
   const repoOptions = useMemo(() => Array.from(new Set(runs.map((run) => run.repo))).sort(), [runs]);
   const filteredRuns = useMemo(() => {
@@ -570,7 +1002,13 @@ export function PipelineMonitorPanel() {
           </CardContent>
         </Card>
 
-        <RunActions run={selectedRun} setupRepo={selectedSetupRepo} />
+        <RunActions
+          run={selectedRun}
+          setupRepo={selectedSetupRepo}
+          onOpenReport={(run) => void openRunReport(run)}
+          onDownloadReport={(run) => void downloadRunReportWithDetails(run)}
+          reportLoading={Boolean(selectedRun && reportLoadingId === selectedRun.id)}
+        />
       </div>
 
       <Card>
@@ -592,7 +1030,7 @@ export function PipelineMonitorPanel() {
                   severity={finding.severity || "info"}
                   message={finding.message || undefined}
                   file={finding.file_path ? `${finding.file_path}${finding.line_number ? `:${finding.line_number}` : ""}` : undefined}
-                  ruleId={`${STAGE_LABELS[finding.stage_name] || finding.stage_name}${finding.scanner ? ` · ${finding.scanner}` : ""}`}
+                  ruleId={`${STAGE_LABELS[finding.stage_name] || finding.stage_name}${finding.scanner ? ` - ${finding.scanner}` : ""}`}
                   recommendation={finding.recommendation || undefined}
                 />
               ))}
@@ -648,7 +1086,7 @@ export function PipelineMonitorPanel() {
                 render: (run) => (
                   <button className="text-left" onClick={() => setSelectedRunId(run.id)}>
                     <span className="block font-semibold text-zinc-950 hover:text-blue-600">{run.repo}</span>
-                    <span className="mt-1 block font-mono text-xs text-zinc-500">{shortSha(run.commit_sha)} · {run.branch || "-"}</span>
+                    <span className="mt-1 block font-mono text-xs text-zinc-500">{shortSha(run.commit_sha)} - {run.branch || "-"}</span>
                   </button>
                 ),
               },
@@ -681,10 +1119,26 @@ export function PipelineMonitorPanel() {
                   const high = numberFromSummary(summary, "critical") + numberFromSummary(summary, "high");
                   return (
                     <span className="text-sm text-zinc-700">
-                      <strong className="text-zinc-950">{total}</strong> total · {high} critical/high
+                      <strong className="text-zinc-950">{total}</strong> total - {high} critical/high
                     </span>
                   );
                 },
+              },
+              {
+                key: "report",
+                header: "Report",
+                render: (run) => (
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={() => void openRunReport(run)} disabled={reportLoadingId === run.id}>
+                      {reportLoadingId === run.id ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : <Eye className="mr-2 size-3.5" />}
+                      Open
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => void downloadRunReportWithDetails(run)} disabled={reportLoadingId === run.id}>
+                      <Download className="mr-2 size-3.5" />
+                      MD
+                    </Button>
+                  </div>
+                ),
               },
               {
                 key: "workflow",
@@ -709,6 +1163,14 @@ export function PipelineMonitorPanel() {
       <p className="text-xs text-zinc-500">
         Signed in as {auth?.user?.github_login || "current GitHub user"}. Pipeline Monitor shows normalized reports only; raw scanner values and secrets are not displayed.
       </p>
+
+      <ReportDrawer
+        open={Boolean(reportRun)}
+        run={reportRun}
+        onClose={() => setReportRun(null)}
+        onDownloadMarkdown={() => reportRun ? downloadRunReport(reportRun, "markdown") : undefined}
+        onDownloadJson={() => reportRun ? downloadRunReport(reportRun, "json") : undefined}
+      />
     </div>
   );
 }

@@ -33,7 +33,7 @@ from core.config import settings
 from core.database import SessionLocal, init_db
 from core.errors import RepoHubError
 from core.github_client import GitHubAPIError, get_github_client
-from core.models import AnalysisHistory
+from core.models import AnalysisBatch, AnalysisHistory
 from modules.metadata.models import Commit, Contributor, FileTree, Repository
 from core.session import SignedCookieSessionMiddleware
 from modules.auth.routes import router as auth_router
@@ -402,12 +402,134 @@ def _save_history(repo: str, results: dict, batch_id: str | None, duration_ms: i
         db.close()
 
 
-def _cached_analysis(repo: str) -> dict | None:
-    return analysis_cache.get(f"analysis:{repo.lower()}")
+def _clean_batch_id(value: str | None) -> str:
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("_.-")
+    return base or f"batch_{int(datetime.now(timezone.utc).timestamp())}"
 
 
-def _set_cached_analysis(repo: str, data: dict) -> None:
-    analysis_cache.set(f"analysis:{repo.lower()}", data)
+def _unique_batch_id(db, tenant_id: int, requested_batch_id: str | None) -> str:
+    base = _clean_batch_id(requested_batch_id)
+    existing_history = (
+        db.query(AnalysisHistory.id)
+        .filter(
+            AnalysisHistory.tenant_id == tenant_id,
+            AnalysisHistory.batch_id == base,
+        )
+        .first()
+    )
+    existing_batch = (
+        db.query(AnalysisBatch.id)
+        .filter(
+            AnalysisBatch.tenant_id == tenant_id,
+            AnalysisBatch.batch_id == base,
+        )
+        .first()
+    )
+    if not existing_history and not existing_batch:
+        return base
+
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    for attempt in range(1, 100):
+        candidate = f"{base}_{timestamp}_{attempt}"
+        existing_history = (
+            db.query(AnalysisHistory.id)
+            .filter(
+                AnalysisHistory.tenant_id == tenant_id,
+                AnalysisHistory.batch_id == candidate,
+            )
+            .first()
+        )
+        existing_batch = (
+            db.query(AnalysisBatch.id)
+            .filter(
+                AnalysisBatch.tenant_id == tenant_id,
+                AnalysisBatch.batch_id == candidate,
+            )
+            .first()
+        )
+        if not existing_history and not existing_batch:
+            return candidate
+    return f"{base}_{timestamp}_{hashlib.sha1(base.encode('utf-8')).hexdigest()[:8]}"
+
+
+def _create_analysis_batch(db, tenant_id: int, batch_id: str, repos: list[str]) -> AnalysisBatch:
+    record = AnalysisBatch(
+        tenant_id=tenant_id,
+        batch_id=batch_id,
+        status="running",
+        requested_count=len(repos),
+        completed_count=0,
+        failed_count=0,
+        requested_repos=repos,
+        result_summary={"requested": len(repos), "completed": 0, "failed": 0},
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def _finish_analysis_batch(
+    tenant_id: int,
+    batch_id: str,
+    batch_results: list[dict],
+    *,
+    error: str | None = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        record = (
+            db.query(AnalysisBatch)
+            .filter(
+                AnalysisBatch.tenant_id == tenant_id,
+                AnalysisBatch.batch_id == batch_id,
+            )
+            .first()
+        )
+        if not record:
+            return
+
+        completed_count = sum(1 for item in batch_results if item.get("status") != "failed")
+        failed_count = sum(1 for item in batch_results if item.get("status") == "failed")
+        if error:
+            status = "error"
+        elif failed_count and not completed_count:
+            status = "failed"
+        elif failed_count:
+            status = "completed_with_errors"
+        else:
+            status = "completed"
+
+        record.status = status
+        record.completed_count = completed_count
+        record.failed_count = failed_count
+        record.completed_at = datetime.now(timezone.utc)
+        record.result_summary = {
+            "requested": record.requested_count,
+            "completed": completed_count,
+            "failed": failed_count,
+            "error": error,
+        }
+        record.raw_json = {"results": batch_results}
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"Error updating analysis batch {batch_id}: {exc}")
+    finally:
+        db.close()
+
+
+def _analysis_cache_key(repo: str, tenant_id: int | None) -> str:
+    tenant_part = tenant_id if tenant_id is not None else "anonymous"
+    return f"analysis:{tenant_part}:{repo.lower()}"
+
+
+def _cached_analysis(repo: str, tenant_id: int | None) -> dict | None:
+    return analysis_cache.get(_analysis_cache_key(repo, tenant_id))
+
+
+def _set_cached_analysis(repo: str, tenant_id: int | None, data: dict) -> None:
+    analysis_cache.set(_analysis_cache_key(repo, tenant_id), data)
 
 
 def _module_worker(module: str, target, progress_queue: queue.Queue, results: dict) -> None:
@@ -425,7 +547,7 @@ def _module_worker(module: str, target, progress_queue: queue.Queue, results: di
 
 def run_single_analysis_stream(repo: str, batch_id: str | None = None, use_cache: bool = True, tenant_id: int | None = None):
     """Run all analyzers in parallel and stream structured SSE messages."""
-    cached = _cached_analysis(repo) if use_cache else None
+    cached = _cached_analysis(repo, tenant_id) if use_cache else None
     if cached:
         yield sse_event("progress", {
             "module": "cache",
@@ -433,10 +555,19 @@ def run_single_analysis_stream(repo: str, batch_id: str | None = None, use_cache
             "data": f"Loaded cached analysis for {repo}",
             "level": "success",
         })
-        cached = {**cached, "cache_hit": True}
-        if not cached.get("metadata_details"):
-            cached["metadata_details"] = _metadata_details_from_results(cached)
-        yield sse_event("done", cached)
+        now = datetime.now(timezone.utc).isoformat()
+        cached_payload = {
+            **cached,
+            "repo": repo,
+            "batch_id": batch_id,
+            "analyzed_at": now,
+            "analysis_duration_ms": 0,
+            "cache_hit": True,
+        }
+        cached_payload["history_id"] = _save_history(repo, cached_payload, batch_id, 0, tenant_id)
+        if not cached_payload.get("metadata_details"):
+            cached_payload["metadata_details"] = _metadata_details_from_results(cached_payload)
+        yield sse_event("done", cached_payload)
         return
 
     started = time.perf_counter()
@@ -494,6 +625,7 @@ def run_single_analysis_stream(repo: str, batch_id: str | None = None, use_cache
         duration_ms = int((time.perf_counter() - started) * 1000)
         combined = {
             "repo": repo,
+            "batch_id": batch_id,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "analysis_duration_ms": duration_ms,
             "metadata": results.get("metadata"),
@@ -503,7 +635,7 @@ def run_single_analysis_stream(repo: str, batch_id: str | None = None, use_cache
         }
         combined["metadata_details"] = _metadata_details_from_results(combined)
         combined["history_id"] = _save_history(repo, combined, batch_id, duration_ms, tenant_id)
-        _set_cached_analysis(repo, combined)
+        _set_cached_analysis(repo, tenant_id, combined)
         yield sse_event("done", combined)
     except Exception as exc:
         yield sse_event("error", {
@@ -553,7 +685,7 @@ async def analyze_full(request: Request):
 async def analyze_batch(request: Request):
     body = await request.json()
     repos = body.get("repos", [])
-    batch_id = body.get("batch_id", f"batch_{int(datetime.now().timestamp())}")
+    requested_batch_id = body.get("batch_id")
 
     if not repos:
         return JSONResponse({"error": "No repositories provided"}, status_code=400)
@@ -562,37 +694,49 @@ async def analyze_batch(request: Request):
     try:
         tenant = resolve_request_tenant(db, request)
         tenant_id = tenant.id
+        batch_id = _unique_batch_id(db, tenant_id, requested_batch_id)
+        batch_record = _create_analysis_batch(db, tenant_id, batch_id, repos)
+        batch_db_id = batch_record.id
     except AuthRequiredError as exc:
         return JSONResponse({"error": str(exc)}, status_code=401)
+    except Exception as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=500)
     finally:
         db.close()
 
     def batch_event_stream():
         batch_results = []
-        for index, raw_repo in enumerate(repos):
-            try:
-                repo = normalize_repo_input(raw_repo)
-            except ValueError as exc:
-                failed = {"repo": raw_repo, "status": "failed", "error": str(exc)}
-                batch_results.append(failed)
-                yield sse_event("repo_failed", failed)
-                continue
+        try:
+            yield sse_event("batch_started", {"batch_id": batch_id, "batch_db_id": batch_db_id, "total": len(repos)})
+            for index, raw_repo in enumerate(repos):
+                try:
+                    repo = normalize_repo_input(raw_repo)
+                except ValueError as exc:
+                    failed = {"repo": raw_repo, "status": "failed", "error": str(exc)}
+                    batch_results.append(failed)
+                    yield sse_event("repo_failed", failed)
+                    continue
 
-            yield sse_event("batch_progress", {"current": index + 1, "total": len(repos), "repo": repo})
-            last_done_data = None
+                yield sse_event("batch_progress", {"current": index + 1, "total": len(repos), "repo": repo})
+                last_done_data = None
 
-            for message in run_single_analysis_stream(repo, batch_id, tenant_id=tenant_id):
-                yield message
-                if message.startswith("event: done\n"):
-                    try:
-                        last_done_data = json.loads(message.split("data: ", 1)[1].strip())
-                    except Exception:
-                        last_done_data = None
+                for message in run_single_analysis_stream(repo, batch_id, tenant_id=tenant_id):
+                    yield message
+                    if message.startswith("event: done\n"):
+                        try:
+                            last_done_data = json.loads(message.split("data: ", 1)[1].strip())
+                        except Exception:
+                            last_done_data = None
 
-            if last_done_data:
-                batch_results.append(last_done_data)
+                if last_done_data:
+                    batch_results.append(last_done_data)
 
-        yield sse_event("batch_done", batch_results)
+            _finish_analysis_batch(tenant_id, batch_id, batch_results)
+            yield sse_event("batch_done", {"batch_id": batch_id, "results": batch_results})
+        except Exception as exc:
+            _finish_analysis_batch(tenant_id, batch_id, batch_results, error=str(exc))
+            yield sse_event("error", {"error": str(exc), "code": "batch_stream_error"})
 
     return StreamingResponse(
         batch_event_stream(),
@@ -958,6 +1102,7 @@ async def clear_history(request: Request):
     db = SessionLocal()
     try:
         tenant = resolve_request_tenant(db, request)
+        db.query(AnalysisBatch).filter(AnalysisBatch.tenant_id == tenant.id).delete()
         db.query(AnalysisHistory).filter(AnalysisHistory.tenant_id == tenant.id).delete()
         db.commit()
         analysis_cache.clear()
