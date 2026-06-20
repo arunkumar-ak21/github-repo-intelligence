@@ -19,11 +19,22 @@ class Settings:
     PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
     DEFAULT_TENANT_NAME: str = os.getenv("DEFAULT_TENANT_NAME", "Local Development")
     DEFAULT_TENANT_SLUG: str = os.getenv("DEFAULT_TENANT_SLUG", "local-dev")
-    REQUIRE_LOGIN: bool = os.getenv("REQUIRE_LOGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    REQUIRE_LOGIN: bool = os.getenv("REQUIRE_LOGIN", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     SESSION_SECRET: str = os.getenv("SESSION_SECRET", "local-dev-session-secret-change-me")
     SESSION_COOKIE_NAME: str = os.getenv("SESSION_COOKIE_NAME", "arya_quality_session")
     SESSION_MAX_AGE_SECONDS: int = int(os.getenv("SESSION_MAX_AGE_SECONDS", "604800"))
-    SESSION_COOKIE_SECURE: bool = os.getenv("SESSION_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    SESSION_COOKIE_SECURE: bool = os.getenv("SESSION_COOKIE_SECURE", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     GITHUB_APP_NAME: str = os.getenv("GITHUB_APP_NAME", "Arya tech Repo Quality Platform")
     GITHUB_APP_SLUG: str = os.getenv("GITHUB_APP_SLUG", "").strip()
@@ -45,21 +56,63 @@ class Settings:
         "company/repo-quality-platform/.github/workflows/reusable-quality-gate.yml@main",
     )
     QUALITY_WORKFLOW_MODE: str = os.getenv("QUALITY_WORKFLOW_MODE", "standalone").strip().lower()
-    PROVISIONING_DRY_RUN: bool = os.getenv("PROVISIONING_DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    # Real Code-Quality scanner integration.
+    # The generated GitHub Actions workflow uses these values to fetch and install
+    # your standalone Code-Quality project instead of using the temporary scanner.
+    QUALITY_SCANNER_REPOSITORY: str = os.getenv(
+        "QUALITY_SCANNER_REPOSITORY",
+        "",
+    ).strip()
+    QUALITY_SCANNER_REF: str = os.getenv(
+        "QUALITY_SCANNER_REF",
+        "main",
+    ).strip()
+    QUALITY_SCANNER_SUBDIRECTORY: str = os.getenv(
+        "QUALITY_SCANNER_SUBDIRECTORY",
+        "",
+    ).strip().strip("/")
+    QUALITY_SCANNER_PACKAGE_EXTRAS: str = os.getenv(
+        "QUALITY_SCANNER_PACKAGE_EXTRAS",
+        "scanners-linux",
+    ).strip()
+    QUALITY_SCANNER_REPO_TOKEN: str = os.getenv(
+        "QUALITY_SCANNER_REPO_TOKEN",
+        "",
+    ).strip()
+
+    # monitor  = send report to dashboard but do not fail GitHub Actions
+    # enforce  = fail GitHub Actions when the scanner finds blocking issues
+    QUALITY_GATE_ENFORCEMENT: str = os.getenv(
+        "QUALITY_GATE_ENFORCEMENT",
+        "monitor",
+    ).strip().lower()
+
+    PROVISIONING_DRY_RUN: bool = os.getenv("PROVISIONING_DRY_RUN", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     AUTO_SYNC_REPOS_ON_INSTALL: bool = os.getenv(
-        "AUTO_SYNC_REPOS_ON_INSTALL", "true"
+        "AUTO_SYNC_REPOS_ON_INSTALL",
+        "true",
     ).strip().lower() in {"1", "true", "yes", "on"}
     AUTO_PROVISION_ON_INSTALL: bool = os.getenv(
-        "AUTO_PROVISION_ON_INSTALL", "false"
+        "AUTO_PROVISION_ON_INSTALL",
+        "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
     AUTO_PROVISION_ON_SYNC: bool = os.getenv(
-        "AUTO_PROVISION_ON_SYNC", "false"
+        "AUTO_PROVISION_ON_SYNC",
+        "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
     AUTO_REPROVISION_ACTIVE_REPOS: bool = os.getenv(
-        "AUTO_REPROVISION_ACTIVE_REPOS", "false"
+        "AUTO_REPROVISION_ACTIVE_REPOS",
+        "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
     ALLOW_LOCAL_DASHBOARD_URL_FOR_PROVISIONING: bool = os.getenv(
-        "ALLOW_LOCAL_DASHBOARD_URL_FOR_PROVISIONING", "false"
+        "ALLOW_LOCAL_DASHBOARD_URL_FOR_PROVISIONING",
+        "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
 
     _raw_github_token = os.getenv("GITHUB_TOKEN", "").strip()
@@ -74,13 +127,15 @@ class Settings:
 
     DASHBOARD_API_KEY: str = os.getenv("DASHBOARD_API_KEY", "").strip()
     ALLOW_UNREGISTERED_REPOS: bool = os.getenv(
-        "ALLOW_UNREGISTERED_REPOS", "false"
+        "ALLOW_UNREGISTERED_REPOS",
+        "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
     MAX_REPORT_PAYLOAD_BYTES: int = int(os.getenv("MAX_REPORT_PAYLOAD_BYTES", "5242880"))
     MAX_FINDINGS_PER_REPORT: int = int(os.getenv("MAX_FINDINGS_PER_REPORT", "500"))
     REPORT_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("REPORT_RATE_LIMIT_PER_MINUTE", "120"))
     ENABLE_LOCAL_QUALITY_SCAN: bool = os.getenv(
-        "ENABLE_LOCAL_QUALITY_SCAN", "false"
+        "ENABLE_LOCAL_QUALITY_SCAN",
+        "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
 
     HOST: str = os.getenv("HOST", "127.0.0.1")

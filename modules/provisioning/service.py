@@ -20,7 +20,23 @@ from modules.tenancy.service import record_audit_event
 
 QUALITY_RULESET_NAME = "Arya Quality Required Checks"
 REQUIRED_SECRET_NAMES = {"DASHBOARD_URL", "DASHBOARD_API_KEY"}
+SCANNER_REPO_SECRET_NAME = "ARYA_SCANNER_REPO_TOKEN"
+MANAGED_SECRET_NAMES = REQUIRED_SECRET_NAMES | {SCANNER_REPO_SECRET_NAME}
 REQUIRED_STATUS_CHECKS = {"quality-gate", "compiler-check"}
+
+
+def required_secret_names() -> set[str]:
+    """Secrets that must exist for the generated workflow in the current mode.
+
+    ARYA_SCANNER_REPO_TOKEN is only required when the scanner repository is private
+    or the platform admin explicitly configured QUALITY_SCANNER_REPO_TOKEN.
+    Public scanner repositories do not need this secret.
+    """
+
+    names = set(REQUIRED_SECRET_NAMES)
+    if settings.QUALITY_SCANNER_REPO_TOKEN:
+        names.add(SCANNER_REPO_SECRET_NAME)
+    return names
 
 
 class ProvisioningError(RuntimeError):
@@ -131,12 +147,44 @@ def provisioning_blockers() -> list[str]:
         blockers.append(str(exc))
     if settings.QUALITY_WORKFLOW_MODE == "reusable" and settings.QUALITY_REUSABLE_WORKFLOW_REF.startswith("company/"):
         blockers.append("QUALITY_REUSABLE_WORKFLOW_REF is still the placeholder central workflow reference.")
+    if settings.QUALITY_WORKFLOW_MODE == "standalone" and not settings.QUALITY_SCANNER_REPOSITORY:
+        blockers.append("QUALITY_SCANNER_REPOSITORY is not configured; the client workflow cannot install the real Code-Quality scanner.")
     if not settings.GITHUB_APP_ID:
         blockers.append("GITHUB_APP_ID is not configured.")
     if not (settings.GITHUB_APP_PRIVATE_KEY or settings.GITHUB_APP_PRIVATE_KEY_PATH):
         blockers.append("GitHub App private key is not configured on the backend.")
     return blockers
 
+
+
+def _workflow_scalar(value: str) -> str:
+    """Return a safe one-line value for insertion into generated YAML."""
+
+    return str(value or "").replace('"', '\\"').replace("\n", " ").strip()
+
+
+def _quality_gate_enforcement() -> str:
+    value = (settings.QUALITY_GATE_ENFORCEMENT or "monitor").strip().lower()
+    return value if value in {"monitor", "enforce"} else "monitor"
+
+
+def _scanner_package_path_expression() -> str:
+    """Bash expression used by generated workflows to install the scanner package."""
+
+    return """SCANNER_ROOT=\"$GITHUB_WORKSPACE/.arya/code-quality\"
+if [ -n \"$ARYA_SCANNER_SUBDIRECTORY\" ]; then
+  SCANNER_ROOT=\"$SCANNER_ROOT/$ARYA_SCANNER_SUBDIRECTORY\"
+fi
+if [ ! -f \"$SCANNER_ROOT/pyproject.toml\" ]; then
+  echo \"::error::Code-Quality scanner pyproject.toml was not found at $SCANNER_ROOT\"
+  echo \"Check QUALITY_SCANNER_REPOSITORY, QUALITY_SCANNER_REF and QUALITY_SCANNER_SUBDIRECTORY.\"
+  exit 1
+fi
+if [ -n \"$ARYA_SCANNER_PACKAGE_EXTRAS\" ]; then
+  python -m pip install -e \"$SCANNER_ROOT[$ARYA_SCANNER_PACKAGE_EXTRAS]\"
+else
+  python -m pip install -e \"$SCANNER_ROOT\"
+fi"""
 
 
 def render_caller_workflow() -> str:
@@ -155,13 +203,292 @@ def render_caller_workflow() -> str:
             "jobs:",
             "  quality:",
             f"    uses: {settings.QUALITY_REUSABLE_WORKFLOW_REF}",
+            "    with:",
+            f'      scanner_repository: "{_workflow_scalar(settings.QUALITY_SCANNER_REPOSITORY)}"',
+            f'      scanner_ref: "{_workflow_scalar(settings.QUALITY_SCANNER_REF)}"',
+            f'      scanner_subdirectory: "{_workflow_scalar(settings.QUALITY_SCANNER_SUBDIRECTORY)}"',
+            f'      scanner_package_extras: "{_workflow_scalar(settings.QUALITY_SCANNER_PACKAGE_EXTRAS)}"',
+            f'      enforcement: "{_quality_gate_enforcement()}"',
             "    secrets: inherit",
             "",
         ]
     )
 
-
 def render_standalone_workflow() -> str:
+    """Generate the client-repository workflow that runs the real Code-Quality package.
+
+    The previous temporary scanner is intentionally kept below as
+    render_builtin_fallback_workflow() for local emergency fallback, but the
+    production path must install and run the standalone cq-pipeline package.
+    """
+
+    scanner_repository = _workflow_scalar(settings.QUALITY_SCANNER_REPOSITORY)
+    if not scanner_repository or scanner_repository.lower() == "builtin":
+        return render_builtin_fallback_workflow()
+
+    scanner_ref = _workflow_scalar(settings.QUALITY_SCANNER_REF or "main")
+    scanner_subdirectory = _workflow_scalar(settings.QUALITY_SCANNER_SUBDIRECTORY)
+    scanner_package_extras = _workflow_scalar(settings.QUALITY_SCANNER_PACKAGE_EXTRAS)
+    enforcement = _quality_gate_enforcement()
+    install_scanner_script = _scanner_package_path_expression()
+
+    return f"""name: Company Quality Pipeline
+
+on:
+  push:
+    branches: [main, develop, "feature/**"]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  actions: read
+
+env:
+  ARYA_SCANNER_REPOSITORY: "{scanner_repository}"
+  ARYA_SCANNER_REF: "{scanner_ref}"
+  ARYA_SCANNER_SUBDIRECTORY: "{scanner_subdirectory}"
+  ARYA_SCANNER_PACKAGE_EXTRAS: "{scanner_package_extras}"
+  ARYA_QUALITY_GATE_ENFORCEMENT: "{enforcement}"
+
+jobs:
+  quality-gate:
+    name: quality-gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: source
+
+      - name: Checkout Arya Code Quality scanner
+        uses: actions/checkout@v4
+        with:
+          repository: ${{{{ env.ARYA_SCANNER_REPOSITORY }}}}
+          ref: ${{{{ env.ARYA_SCANNER_REF }}}}
+          path: .arya/code-quality
+          token: ${{{{ secrets.ARYA_SCANNER_REPO_TOKEN || github.token }}}}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Arya Code Quality scanner
+        run: |
+          python -m pip install --upgrade pip
+{_indent_for_yaml(install_scanner_script, 10)}
+
+      - name: Install external scanner tools
+        run: |
+          set -e
+          if ! command -v gitleaks >/dev/null 2>&1; then
+            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz \
+              | sudo tar -xz -C /usr/local/bin/ gitleaks
+          fi
+          gitleaks version || true
+          semgrep --version || true
+
+      - name: Run Arya Code Quality scan
+        run: |
+          mkdir -p reports source/reports
+          echo "SCAN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+          set +e
+          cq-pipeline scan --all --format all --project "$GITHUB_WORKSPACE/source"
+          SCAN_EXIT=$?
+          set -e
+
+          echo "SCAN_EXIT=$SCAN_EXIT" >> "$GITHUB_ENV"
+
+      - name: Normalize report filenames
+        if: always()
+        run: |
+          mkdir -p reports
+
+          TARGET_JSON="reports/quality-report.json"
+          TARGET_HTML="reports/quality-report.html"
+
+          JSON_REPORT="$(ls -t source/reports/*.json reports/*.json 2>/dev/null | head -n 1 || true)"
+          HTML_REPORT="$(ls -t source/reports/*.html reports/*.html 2>/dev/null | head -n 1 || true)"
+
+          if [ -n "$JSON_REPORT" ]; then
+            if [ "$JSON_REPORT" != "$TARGET_JSON" ]; then
+              cp "$JSON_REPORT" "$TARGET_JSON"
+            fi
+          else
+            echo '{{"verdict":"error","error":"No JSON report generated by cq-pipeline"}}' > "$TARGET_JSON"
+          fi
+
+          if [ -n "$HTML_REPORT" ]; then
+            if [ "$HTML_REPORT" != "$TARGET_HTML" ]; then
+              cp "$HTML_REPORT" "$TARGET_HTML"
+            fi
+          else
+            echo "<html><body><h1>No HTML report generated</h1></body></html>" > "$TARGET_HTML"
+          fi
+
+      - name: Build dashboard quality payload
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          report_path = Path("reports/quality-report.json")
+          raw = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {{"verdict": "error"}}
+          verdict = str(raw.get("verdict") or "error").lower()
+          if verdict in {{"pass", "passed"}}:
+              verdict, status, blocking = "pass", "passed", False
+          elif verdict in {{"warn", "warning"}}:
+              verdict, status, blocking = "warn", "passed", False
+          elif verdict in {{"fail", "failed"}}:
+              verdict, status, blocking = "fail", "failed", True
+          else:
+              verdict, status, blocking = "error", "error", True
+
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          pr_number = (event.get("pull_request") or {{}}).get("number")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          findings = []
+          for scan in raw.get("scan_results") or []:
+              scanner_name = scan.get("scanner_name") or scan.get("scanner")
+              for finding in scan.get("findings") or []:
+                  findings.append({{
+                      "scanner": finding.get("scanner") or scanner_name,
+                      "severity": finding.get("severity"),
+                      "rule_id": finding.get("rule_id"),
+                      "title": finding.get("title"),
+                      "message": finding.get("message"),
+                      "file_path": finding.get("file_path"),
+                      "line_number": finding.get("line_number"),
+                      "recommendation": finding.get("recommendation") or finding.get("suggestion"),
+                  }})
+
+          payload = {{
+              "repo": repo,
+              "branch": os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME"),
+              "commit_sha": os.environ["GITHUB_SHA"],
+              "pr_number": pr_number,
+              "workflow_run_id": run_id,
+              "workflow_url": f"https://github.com/{{repo}}/actions/runs/{{run_id}}",
+              "stage": "quality_gate",
+              "status_check": "quality-gate",
+              "verdict": verdict,
+              "status": status,
+              "blocking": blocking,
+              "started_at": os.environ.get("SCAN_STARTED_AT"),
+              "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "summary": {{
+                  "total_findings": raw.get("total_findings", len(findings)),
+                  "critical": raw.get("critical_count", 0),
+                  "high": raw.get("high_count", 0),
+                  "medium": raw.get("medium_count", 0),
+                  "low": raw.get("low_count", 0),
+                  "files_scanned": raw.get("files_scanned", 0),
+                  "duration_seconds": raw.get("duration_seconds", 0),
+                  "enforcement": os.environ.get("ARYA_QUALITY_GATE_ENFORCEMENT", "monitor"),
+                  "scanner_repository": os.environ.get("ARYA_SCANNER_REPOSITORY", ""),
+              }},
+              "findings": findings[:500],
+              "artifacts": {{
+                  "json_report": "quality-report.json",
+                  "html_report": "quality-report.html",
+                  "github_artifact": "quality-report",
+              }},
+              "raw_report": raw,
+          }}
+          Path("reports/dashboard-quality-payload.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+          summary = {{key: payload[key] for key in ["repo", "branch", "commit_sha", "pr_number", "workflow_run_id", "workflow_url", "stage", "status_check", "verdict", "status", "blocking", "started_at", "finished_at", "summary", "artifacts"]}}
+          Path("reports/workflow-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+          PY
+
+      - name: Upload Quality Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-report
+          path: reports/
+
+      - name: Send Quality Report to Dashboard
+        if: always()
+        run: |
+          set +e
+          DASHBOARD_URL="${{{{ secrets.DASHBOARD_URL }}}}"
+          DASHBOARD_API_KEY="${{{{ secrets.DASHBOARD_API_KEY }}}}"
+
+          if [ -z "$DASHBOARD_URL" ]; then
+            echo "::warning::DASHBOARD_URL secret is missing or empty. Report was not sent."
+            exit 0
+          fi
+          case "$DASHBOARD_URL" in
+            http://*|https://*) ;;
+            *) echo "::warning::DASHBOARD_URL must start with http:// or https://. Report was not sent."; exit 0 ;;
+          esac
+          if [ -z "$DASHBOARD_API_KEY" ]; then
+            echo "::warning::DASHBOARD_API_KEY secret is missing or empty. Report was not sent."
+            exit 0
+          fi
+
+          HTTP_CODE=$(curl -sS -o /tmp/dashboard_response.txt -w "%{{http_code}}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -X POST "$DASHBOARD_URL/api/quality/report" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DASHBOARD_API_KEY" \
+            --data-binary @reports/dashboard-quality-payload.json)
+          CURL_EXIT=$?
+          set -e
+
+          if [ "$CURL_EXIT" != "0" ]; then
+            echo "::warning::Dashboard submission failed with curl exit code $CURL_EXIT"
+            cat /tmp/dashboard_response.txt || true
+          elif [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::warning::Dashboard submission returned HTTP $HTTP_CODE"
+            cat /tmp/dashboard_response.txt || true
+          else
+            echo "Dashboard submission successful with HTTP $HTTP_CODE"
+          fi
+
+      - name: Complete quality gate
+        if: ${{{{ !startsWith(github.head_ref, 'arya/setup-quality-pipeline') && !startsWith(github.ref_name, 'arya/setup-quality-pipeline') }}}}
+        run: |
+          ENFORCEMENT="${{{{ vars.QUALITY_GATE_ENFORCEMENT || env.ARYA_QUALITY_GATE_ENFORCEMENT }}}}"
+          if [ "$ENFORCEMENT" = "enforce" ]; then
+            echo "Enforce mode enabled. Exiting with scan result: $SCAN_EXIT"
+            exit "$SCAN_EXIT"
+          fi
+          echo "Monitor mode enabled. Findings are reported to dashboard but this GitHub check will pass."
+          exit 0
+
+  compiler-check:
+    name: compiler-check
+    runs-on: ubuntu-latest
+    needs: quality-gate
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Run compiler check
+        run: |
+          echo "Compiler check placeholder"
+"""
+
+
+def _indent_for_yaml(script: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(prefix + line if line else line for line in script.splitlines())
+
+
+def render_builtin_fallback_workflow() -> str:
     return r"""name: Company Quality Pipeline
 
 on:
@@ -1236,9 +1563,17 @@ def provision_repository(db: Session, repo: MonitoredRepository) -> dict[str, An
     # 1) Secrets first. This is the core automation fix.
     github.set_repo_secret(repo.owner, repo.repo, "DASHBOARD_URL", dashboard_url, token)
     github.set_repo_secret(repo.owner, repo.repo, "DASHBOARD_API_KEY", raw_key, token)
+    if settings.QUALITY_SCANNER_REPO_TOKEN:
+        github.set_repo_secret(
+            repo.owner,
+            repo.repo,
+            SCANNER_REPO_SECRET_NAME,
+            settings.QUALITY_SCANNER_REPO_TOKEN,
+            token,
+        )
 
     secret_names = github.list_repo_secret_names(repo.owner, repo.repo, token)
-    missing_secrets = sorted(REQUIRED_SECRET_NAMES - secret_names)
+    missing_secrets = sorted(required_secret_names() - secret_names)
     if missing_secrets:
         raise ProvisioningError(
             "GitHub Actions secrets were not created correctly: " + ", ".join(missing_secrets)
@@ -1250,8 +1585,10 @@ def provision_repository(db: Session, repo: MonitoredRepository) -> dict[str, An
         "dashboard_api_key_secret_configured",
         "secrets_verified_before_workflow",
     ])
+    if settings.QUALITY_SCANNER_REPO_TOKEN:
+        result["actions"].append("scanner_repo_token_secret_configured")
     result["dashboard_url_configured"] = dashboard_url
-    result["secrets_verified"] = sorted(secret_names & REQUIRED_SECRET_NAMES)
+    result["secrets_verified"] = sorted(secret_names & required_secret_names())
 
     # Make the newly rotated repository API key visible to the report receiver
     # before the workflow commit triggers the first GitHub Actions run.
@@ -1375,7 +1712,7 @@ def deprovision_repository(db: Session, repo: MonitoredRepository, *, user_id: i
     github = GitHubAppApi()
     token = github.installation_token(installation.installation_id)
     try:
-        for secret_name in sorted(REQUIRED_SECRET_NAMES):
+        for secret_name in sorted(MANAGED_SECRET_NAMES):
             github.delete_repo_secret(repo.owner, repo.repo, secret_name, token)
         repo.secrets_configured_at = None
         result["actions"].append("secrets_deleted")
@@ -1440,7 +1777,7 @@ def verify_repository_setup(db: Session, repo: MonitoredRepository) -> dict[str,
     workflow_ok = bool(workflow_content)
 
     secret_names = github.list_repo_secret_names(repo.owner, repo.repo, token)
-    missing_secrets = sorted(REQUIRED_SECRET_NAMES - secret_names)
+    missing_secrets = sorted(required_secret_names() - secret_names)
     secrets_ok = not missing_secrets
 
     ruleset_status = github.quality_ruleset_status(repo.owner, repo.repo, token)
@@ -1491,8 +1828,8 @@ def verify_repository_setup(db: Session, repo: MonitoredRepository) -> dict[str,
             },
             "secrets": {
                 "ok": secrets_ok,
-                "required": sorted(REQUIRED_SECRET_NAMES),
-                "present": sorted(secret_names & REQUIRED_SECRET_NAMES),
+                "required": sorted(required_secret_names()),
+                "present": sorted(secret_names & required_secret_names()),
                 "missing": missing_secrets,
             },
             "ruleset": ruleset_status,
