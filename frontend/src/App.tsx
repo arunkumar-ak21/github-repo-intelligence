@@ -2595,8 +2595,8 @@ function LandingPage({
       {/* ─── Navbar ─────────────────────────────────────────────── */}
       {/* ─── Navbar ─────────────────────────────────────────────── */}
       <GlassFilter />
-      <header className="sticky top-4 z-50 mx-auto max-w-6xl px-4 sm:px-6 mb-8 mt-4">
-        <GlassEffect className="rounded-2xl px-6 py-3">
+      <header className="fixed inset-x-0 top-3 z-50 mx-auto w-full max-w-6xl px-4 sm:top-4 sm:px-6">
+        <GlassEffect className="rounded-2xl px-5 py-3 shadow-lg shadow-zinc-900/10 ring-1 ring-zinc-950/5 sm:px-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="grid size-9 place-items-center rounded-xl bg-zinc-900 text-sm font-bold text-white shadow-inner">RI</div>
@@ -2629,7 +2629,7 @@ function LandingPage({
         </GlassEffect>
       </header>
 
-      <main>
+      <main className="pt-28 sm:pt-32">
         {/* ─── Hero ──────────────────────────────────────────────── */}
         <section className="pb-20 pt-10 lg:pt-16">
           <div className="mx-auto grid max-w-6xl items-center gap-12 px-6 lg:grid-cols-[1.1fr_1fr] lg:gap-16">
