@@ -116,12 +116,12 @@ github-repo-intelligence/
 │       ├── parsers/          # 7 language parsers
 │       └── routes.py         # /api/deps/* endpoints
 │
-├── templates/                # HTML dashboard
-│   └── index.html
+├── frontend/                 # React dashboard served from /react
+│   ├── src/                  # React + TypeScript source
+│   └── dist/                 # Built frontend assets
 │
-├── static/                   # CSS & JS
-│   ├── css/dashboard.css
-│   └── js/dashboard.js
+├── static/                   # Shared static assets, including CodeFlow
+│   └── codeflow/
 │
 └── data/                     # Runtime data (gitignored)
     ├── app.db                # SQLite database

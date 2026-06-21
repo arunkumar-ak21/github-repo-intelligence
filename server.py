@@ -23,9 +23,8 @@ import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from requests.adapters import HTTPAdapter
 
 from core.cache import analysis_cache
@@ -113,7 +112,6 @@ REACT_DIST = PROJECT_ROOT / "frontend" / "dist"
 REACT_ASSETS = REACT_DIST / "assets"
 if REACT_ASSETS.exists():
     app.mount("/react/assets", StaticFiles(directory=str(REACT_ASSETS)), name="react-assets")
-templates = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
 
 app.include_router(meta_router)
 app.include_router(cicd_router)
@@ -127,7 +125,7 @@ app.include_router(provisioning_router)
 @app.get("/react", response_class=HTMLResponse, include_in_schema=False)
 @app.get("/react/{full_path:path}", response_class=HTMLResponse, include_in_schema=False)
 async def react_frontend(full_path: str = ""):
-    """Serve the separately built React frontend without replacing the classic dashboard."""
+    """Serve the built React frontend."""
     index_file = REACT_DIST / "index.html"
     if index_file.exists():
         return FileResponse(index_file)
@@ -646,9 +644,9 @@ def run_single_analysis_stream(repo: str, batch_id: str | None = None, use_cache
         })
 
 
-@app.get("/", response_class=HTMLResponse)
-async def serve_dashboard(request: Request):
-    return templates.TemplateResponse(request, "index.html")
+@app.get("/", include_in_schema=False)
+async def serve_dashboard():
+    return RedirectResponse(url="/react/", status_code=307)
 
 
 @app.post("/api/analyze/full", tags=["Orchestrator"])

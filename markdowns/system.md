@@ -83,10 +83,10 @@ graph TD
 
 ## Core System Components
 
-### 1. Frontend Dashboard (`static/js/dashboard.js`)
-- **Single Page Application (SPA)** built without heavy frameworks for maximum speed.
-- Utilizes the **HTML5 History API** (`history.replaceState` and `popstate`) for smooth navigation between fresh searches and history views without page reloads.
-- **SSE Consumer**: Uses the native `fetch` API and a `TextDecoder` to read chunks from the `text/event-stream`, translating backend progress events into live UI log entries and status spinners.
+### 1. React Frontend Dashboard (`frontend/`)
+- **React + TypeScript SPA** served by FastAPI from `/react`, with `/` redirecting to the React entrypoint.
+- Uses module routes for Overview, CI/CD, Dependencies, Pipeline Monitor, Repo Setup, and History instead of the retired template dashboard.
+- **SSE Consumer**: Uses the browser streaming API to read `text/event-stream` responses and translate backend progress events into live UI state.
 
 ### 2. FastAPI Orchestrator (`server.py`)
 - Acts as the central nervous system. 
