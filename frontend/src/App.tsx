@@ -163,7 +163,15 @@ const MODULES: ModuleConfig[] = [
   },
 ];
 
-const TABS = MODULES;
+/* ── Temporarily suppressed modules (frontend-only) ─────────────────
+ * Metadata, CI/CD, Dependency Analysis, and History are hidden from the
+ * UI until re-enabled. Their MODULES entries are kept intact so the
+ * backend data flow, types, and route constants remain valid.
+ */
+const SUPPRESSED_KEYS: Set<TabKey> = new Set(["overview", "cicd", "deps", "history"]);
+const VISIBLE_MODULES = MODULES.filter((m) => !SUPPRESSED_KEYS.has(m.key));
+
+const TABS = VISIBLE_MODULES;
 const MODULE_BY_KEY = Object.fromEntries(MODULES.map((module) => [module.key, module])) as Record<TabKey, ModuleConfig>;
 const MODULE_KEY_BY_ROUTE = Object.fromEntries(MODULES.map((module) => [module.route, module.key])) as Record<string, TabKey>;
 
@@ -346,14 +354,17 @@ function routeFromLocation(): ViewKey {
 
 function moduleFromLocation(): TabKey {
   const path = window.location.pathname.replace(/\/+$/, "");
-  const route = path.replace(/^\/react\/dashboard\/?/, "").split("/")[0] || "overview";
-  if (route in MODULE_KEY_BY_ROUTE) return MODULE_KEY_BY_ROUTE[route];
-  if (route === "deps") return "deps";
+  const route = path.replace(/^\/react\/dashboard\/?/, "").split("/")[0] || "pipeline";
+  if (route in MODULE_KEY_BY_ROUTE) {
+    const key = MODULE_KEY_BY_ROUTE[route];
+    return SUPPRESSED_KEYS.has(key) ? "pipeline" : key;
+  }
+  if (route === "deps") return "pipeline";
   if (route === "setup") return "setup";
-  return "overview";
+  return "pipeline";
 }
 
-function dashboardPath(tab: TabKey = "overview") {
+function dashboardPath(tab: TabKey = "pipeline") {
   return `/react/dashboard/${MODULE_BY_KEY[tab].route}`;
 }
 
@@ -479,7 +490,7 @@ function ModuleRouteStrip({
   return (
     <nav className="mb-5 overflow-x-auto rounded-lg border border-zinc-200 bg-white p-2" aria-label="Repository intelligence modules">
       <div className="flex min-w-max items-center gap-1">
-        {MODULES.map((module) => {
+        {VISIBLE_MODULES.map((module) => {
           const Icon = module.icon;
           const active = activeTab === module.key;
           return (
@@ -2679,9 +2690,9 @@ function LandingPage({
 
   const PLATFORM_STATS = [
     { value: "9", label: "CI/CD Platforms" },
-    { value: "7", label: "Language Ecosystems" },
     { value: "16", label: "Security Rules" },
-    { value: "5", label: "Analysis Modules" },
+    { value: "4", label: "Quality Stages" },
+    { value: "2", label: "Active Modules" },
   ];
 
   const FOOTER_LINK_GROUPS = [
@@ -2706,47 +2717,36 @@ function LandingPage({
       links: [
         { label: "Pipeline monitor", href: "/react/dashboard/pipeline" },
         { label: "Dashboard", href: "/react/dashboard" },
-        { label: "Analysis history", href: "/react/dashboard/history" },
       ],
     },
   ];
 
+  /* Suppressed: Module 01 (Repository Metadata), Module 02 (CI/CD Pipeline Analysis),
+     Module 03 (Dependency Health) — hidden from frontend only */
   const FEATURES = [
     {
       tag: "Module 01",
-      title: "Repository Metadata",
-      description: "Extract repository facts, stars, forks, language distribution, topics, full commit history timeline, top contributors with contribution counts, and complete file tree structure.",
-      capabilities: ["Commit timeline", "Contributor ranking", "File tree", "README rendering"],
-    },
-    {
-      tag: "Module 02",
-      title: "CI/CD Pipeline Analysis",
-      description: "Detect and analyze pipelines across GitHub Actions, GitLab CI, Jenkins, Azure DevOps, CircleCI, Travis CI, Drone CI, Bitbucket Pipelines, and TeamCity.",
-      capabilities: ["Platform detection", "Job structure parsing", "Security grading A-F", "Complexity scoring"],
-    },
-    {
-      tag: "Module 03",
-      title: "Dependency Health",
-      description: "Detect ecosystems across Python, Node.js, Java, Go, Rust, Ruby, and PHP. Parse manifests and lockfiles with health scoring from 0 to 100.",
-      capabilities: ["7 ecosystem parsers", "Dependabot alerts", "Version drift", "Risk scoring"],
-    },
-    {
-      tag: "Module 04",
       title: "Autonomous Quality Gates",
       description: "Run secret detection, linting, SAST, dependency audits, code quality checks, file scanning, and type checking automatically via GitHub Actions.",
       capabilities: ["Gitleaks + Semgrep", "Required checks", "Quality verdicts", "Report ingestion"],
     },
     {
-      tag: "Module 05",
+      tag: "Module 02",
       title: "DevSecOps Pipeline",
       description: "End-to-end autonomous pipeline from quality gate to compiler check to AI remediation. GitHub Actions enforces, branch protection controls merge eligibility.",
       capabilities: ["GitHub App automation", "Branch protection", "Secret redaction", "Stage tracking"],
     },
     {
-      tag: "Module 06",
+      tag: "Module 03",
+      title: "Pipeline Monitor",
+      description: "Track mandatory GitHub Actions enforcement, quality-gate outcomes, compiler results, and remediation status across all monitored repositories.",
+      capabilities: ["CI/CD integration", "Compiler checks", "Stage tracking", "Report ingestion"],
+    },
+    {
+      tag: "Module 04",
       title: "Multi-Tenant Dashboard",
-      description: "Tenant-scoped workspaces with GitHub OAuth, SSE live progress streaming, tabbed interface, analysis history, and batch repository analysis.",
-      capabilities: ["Tenant isolation", "SSE streaming", "Batch analysis", "History & export"],
+      description: "Tenant-scoped workspaces with GitHub OAuth, SSE live progress streaming, tabbed interface, and batch repository analysis.",
+      capabilities: ["Tenant isolation", "SSE streaming", "Batch analysis", "Repo setup"],
     },
   ];
 
@@ -2844,7 +2844,7 @@ function LandingPage({
                 GitHub enforcement, intelligence, and reporting in one place.
               </h1>
               <p className="mt-6 text-lg leading-relaxed text-zinc-500 pr-4">
-                A unified command center for repository metadata, CI/CD analysis, dependency health, autonomous quality gates, and DevSecOps pipeline enforcement.
+                A unified command center for autonomous quality gates, pipeline monitoring, compiler checks, and DevSecOps enforcement.
               </p>
 
               <div className="mt-8 flex flex-wrap items-center gap-4">
@@ -3633,7 +3633,7 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  function navigate(nextView: ViewKey, tab: TabKey = "overview") {
+  function navigate(nextView: ViewKey, tab: TabKey = "pipeline") {
     const path = nextView === "dashboard" ? dashboardPath(tab) : "/react/";
     window.history.pushState(null, "", path);
     setView(nextView);
@@ -3913,12 +3913,9 @@ export default function App() {
 
           <ModuleRouteStrip activeTab={activeTab} onSelect={openModule} />
 
-          {activeTab === "overview" ? <OverviewPanel data={analysis} onOpenModule={openModule} /> : null}
-          {activeTab === "cicd" ? <CicdPanel data={analysis} /> : null}
-          {activeTab === "deps" ? <DependenciesPanel data={analysis} /> : null}
+          {/* Suppressed panels — overview, cicd, deps, history are hidden from the UI */}
           {activeTab === "pipeline" ? <PipelineMonitorPanel /> : null}
           {activeTab === "setup" ? <RepoSetupPanelV2 repos={setupRepos} auth={auth} onRefresh={loadSetupRepos} onToast={showToast} /> : null}
-          {activeTab === "history" ? <AnalysisHistoryPage history={historyItems} onOpen={openHistory} onDelete={deleteHistory} onClear={clearHistory} onToast={showToast} /> : null}
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
